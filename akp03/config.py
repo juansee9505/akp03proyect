@@ -25,25 +25,38 @@ KEY_TYPES = [
     "previous",
     "play_pause",
     "next",
-    "volume",       # muestra el volumen actual
+    "volume",       # muestra el volumen general
     "volume_up",
     "volume_down",
     "mute",
+    "mic",          # estado del micrófono (pulsar = silenciar)
     "clock",
     "image",        # imagen o animación GIF propia
     "none",
 ]
 
-# Acciones que puede disparar una tecla o botón.
+OBS_ACTIONS = [
+    "obs_record", "obs_record_pause", "obs_stream", "obs_replay",
+    "obs_virtualcam", "obs_scene", "obs_mute",
+]
+
+# Acciones que puede disparar una tecla, botón o pulsación de perilla.
 ACTIONS = [
     "play_pause", "next", "previous",
+    "app_mute",
     "volume_up", "volume_down", "mute",
+    "mic_mute",
     "brightness_up", "brightness_down",
+    *OBS_ACTIONS,
     "open", "none",
 ]
 
 # Acciones al girar una perilla.
-KNOB_TURN_ACTIONS = ["volume", "track", "seek", "brightness", "none"]
+KNOB_TURN_ACTIONS = ["app_volume", "volume", "track", "seek", "brightness",
+                     "obs_scene_cycle", "obs_volume", "none"]
+
+# Acciones que usan el campo "target" (escena / fuente de OBS, programa…).
+TARGET_ACTIONS = {"obs_scene", "obs_mute", "obs_volume", "open"}
 
 # Acción por defecto al pulsar cada tipo de tecla.
 DEFAULT_KEY_ACTION = {
@@ -56,13 +69,29 @@ DEFAULT_KEY_ACTION = {
     "volume_up": "volume_up",
     "volume_down": "volume_down",
     "mute": "mute",
+    "mic": "mic_mute",
     "clock": "none",
     "image": "none",
     "none": "none",
 }
 
+# Valores por defecto de la versión 1 (para migrar configuraciones sin tocar
+# las que el usuario ya personalizó).
+_V1_KNOBS = [
+    {"turn": "volume", "press": "mute"},
+    {"turn": "track", "press": "play_pause"},
+    {"turn": "brightness", "press": "none"},
+]
+_V1_BUTTONS = [
+    {"action": "previous", "target": None},
+    {"action": "play_pause", "target": None},
+    {"action": "next", "target": None},
+]
+
+CONFIG_VERSION = 2
+
 DEFAULT_CONFIG: dict[str, Any] = {
-    "version": 1,
+    "version": CONFIG_VERSION,
     "device": {
         # null = detección automática
         "vid": None,
@@ -96,18 +125,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
         {"type": "play_pause", "image": None, "overlay": True, "action": None, "target": None},
         {"type": "next", "image": None, "overlay": True, "action": None, "target": None},
     ],
+    # Los 3 botones de abajo: OBS.
     "buttons": [
-        {"action": "previous", "target": None},
-        {"action": "play_pause", "target": None},
-        {"action": "next", "target": None},
+        {"action": "obs_record", "target": None},
+        {"action": "obs_stream", "target": None},
+        {"action": "obs_record_pause", "target": None},
     ],
+    # Perilla 1: volumen de la app que suena (Spotify, YouTube en el navegador…).
+    # Perilla 2: volumen general del PC; al presionar silencia el micrófono.
+    # Perilla 3: escenas de OBS; al presionar inicia/detiene la grabación.
     "knobs": [
-        {"turn": "volume", "press": "mute"},
-        {"turn": "track", "press": "play_pause"},
-        {"turn": "brightness", "press": "none"},
+        {"turn": "app_volume", "press": "play_pause", "target": None},
+        {"turn": "volume", "press": "mic_mute", "target": None},
+        {"turn": "obs_scene_cycle", "press": "obs_record", "target": None},
     ],
     "volume_step": 2,
     "seek_step": 5,
+    "obs_volume_step_db": 2,
+    "obs": {
+        "host": "localhost",
+        "port": 4455,
+        "password": "",
+    },
     "media": {
         "backend": "auto",
         "poll_interval": 0.5,
@@ -158,9 +197,23 @@ def _merge(defaults: Any, data: Any) -> Any:
     return copy.deepcopy(defaults)
 
 
+def _migrate(data: dict) -> dict:
+    data = copy.deepcopy(data)
+    if int(data.get("version", 1) or 1) < 2:
+        # v2: perillas y botones nuevos, salvo que el usuario los hubiera cambiado.
+        knobs = [{k: v for k, v in kn.items() if k in ("turn", "press")} for kn in data.get("knobs", [])]
+        if not knobs or knobs == _V1_KNOBS[:len(knobs)]:
+            data.pop("knobs", None)
+        buttons = [{"action": b.get("action"), "target": b.get("target")} for b in data.get("buttons", [])]
+        if not buttons or buttons == _V1_BUTTONS[:len(buttons)]:
+            data.pop("buttons", None)
+    data["version"] = CONFIG_VERSION
+    return data
+
+
 def normalize(cfg: dict) -> dict:
     """Completa y valida una configuración."""
-    cfg = _merge(DEFAULT_CONFIG, cfg or {})
+    cfg = _merge(DEFAULT_CONFIG, _migrate(cfg or {}))
     for key in cfg["keys"]:
         if key.get("type") not in KEY_TYPES:
             key["type"] = "none"

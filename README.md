@@ -7,8 +7,12 @@ como **control de música**, sin necesidad del software oficial.
   Funciona con **Spotify, YouTube (Chrome, Edge, Firefox), Música de Windows, VLC…**:
   cualquier app que aparezca en el panel multimedia de Windows.
 - **Anterior / Play-Pausa / Siguiente** en las teclas.
-- **Volumen** con la perilla (girar = subir/bajar, presionar = silenciar), y aviso en
-  pantalla con el porcentaje.
+- **Volumen sólo de la música** (la app que está sonando: Spotify, o el navegador con
+  YouTube) con una rueda, sin tocar el volumen del resto del PC.
+- **Volumen general de Windows** con otra rueda; al presionarla **silencia el micrófono**.
+- **OBS Studio**: grabar, transmitir, pausar, cambiar de escena, silenciar fuentes,
+  volumen de fuentes, guardar repetición, cámara virtual.
+- Avisos en las teclas: volumen, «Mic OFF», «Grabando», escena actual…
 - Cada tecla se puede **personalizar con tu propia imagen o animación GIF**.
 - Ventana con **vista previa en vivo** de las teclas y toda la configuración.
 - Se queda en la **bandeja del sistema** y puede **iniciar con Windows**.
@@ -22,13 +26,35 @@ como **control de música**, sin necesidad del software oficial.
  ├──────────┼──────────┬──────────────┤
  │    ⏮     │    ⏯     │     ⏭        │
  └──────────┴──────────┴──────────────┘
-  Perilla 1: volumen / silenciar
-  Perilla 2: cambiar canción / play-pausa
-  Perilla 3: brillo
-  Botones 1-3: anterior / play-pausa / siguiente
+  Perilla 1: volumen de la música (app que suena) · presionar = play/pausa
+  Perilla 2: volumen general del PC              · presionar = silenciar micrófono
+  Perilla 3: OBS, cambiar de escena               · presionar = grabar/detener
+  Botones 1-3: OBS grabar / transmitir / pausar grabación
 ```
 
-Todo se puede cambiar desde la ventana.
+¿Cuál es la rueda grande? En la pestaña **Perillas y botones**, gira una rueda y se marca
+«Perilla N ◀». Si la grande no es la 1, intercambia las opciones ahí mismo.
+
+Notas:
+- El volumen de la música cambia el de la **aplicación completa** en el mezclador de
+  Windows: con YouTube en Chrome, cambia el volumen de Chrome (todas sus pestañas).
+- Si no suena nada (o la app no aparece en el mezclador), esa rueda cambia el volumen general.
+- «Silenciar micrófono» silencia el micrófono predeterminado de Windows, así que afecta a
+  todas las apps (OBS, Discord, etc.).
+
+## OBS
+
+1. En OBS (28 o superior): **Herramientas → Ajustes del servidor WebSocket** → marca
+   **Habilitar servidor WebSocket**.
+2. Pulsa **Mostrar información de conexión** y copia la contraseña.
+3. En AKP03 Controller, pestaña **OBS**: pega la contraseña y pulsa **Guardar y probar
+   conexión**. Verás tus escenas y fuentes.
+4. Las acciones con «…» (ir a escena, silenciar fuente, volumen de fuente) usan la columna
+   **Fuente OBS / Escena** de la pestaña *Perillas y botones*: tras probar la conexión
+   puedes elegirlas de la lista.
+
+Si OBS está cerrado, las teclas muestran «OBS · Cerrado» y el programa vuelve a conectar
+solo cuando lo abras.
 
 ## Instalación (Windows 10/11)
 
@@ -68,6 +94,7 @@ En la ventana:
   - *Al pulsar*: acción de la tecla (también «Abrir programa / URL»).
 - **Clic derecho** en una tecla de la vista previa → simula pulsarla.
 - *Perillas y botones*: qué hace girar / presionar cada perilla y cada botón.
+- *OBS*: conexión con OBS Studio.
 - *Apariencia*: brillo, color de acento, color de fondo, velocidad del texto, FPS.
 
 Dos o más teclas seguidas con «Título y artista» se unen en un panel ancho.
@@ -121,9 +148,10 @@ sudo udevadm control --reload && sudo udevadm trigger
 | Archivo | Qué hace |
 |---|---|
 | `akp03/device.py` | Protocolo USB-HID del AKP03 (imágenes, brillo, lectura de teclas/perillas) |
-| `akp03/media/windows.py` | Lo que suena en Windows (GlobalSystemMediaTransportControls) + volumen (pycaw) |
+| `akp03/media/windows.py` | Lo que suena en Windows (GlobalSystemMediaTransportControls) + volumen general, por app y micrófono (pycaw) |
 | `akp03/media/linux.py` | Lo mismo en Linux (playerctl / wpctl) |
 | `akp03/render.py`, `akp03/icons.py` | Dibujo de cada tecla, texto desplazable, GIF animados |
+| `akp03/obs.py` | Cliente de obs-websocket v5 y acciones de OBS |
 | `akp03/controller.py` | Une todo: entradas → acciones, estado → imágenes, reconexión automática |
 | `akp03/gui.py` | Ventana de configuración y vista previa |
 | `packaging/` | Compilación del .exe e instalador |

@@ -12,10 +12,23 @@ class RecordingBackend(MediaBackend):
         self.calls = []
         self.volume = 40
         self.muted = False
+        self.app_volume = 70
+        self.mic = False
 
     def get_state(self):
         return MediaState(title="Song", artist="Artist", app="Spotify", status="playing",
-                          position=1, duration=100, volume=self.volume, muted=self.muted)
+                          position=1, duration=100, volume=self.volume, muted=self.muted,
+                          app_volume=self.app_volume, mic_muted=self.mic)
+
+    def set_app_volume(self, p):
+        self.calls.append(("set_app_volume", p))
+        self.app_volume = p
+        return True
+
+    def toggle_mic_mute(self):
+        self.calls.append("mic")
+        self.mic = not self.mic
+        return self.mic
 
     def play_pause(self):
         self.calls.append("play_pause")
@@ -50,6 +63,14 @@ def wait_for(cond, timeout=3.0):
     return False
 
 
+MUSIC_CONTROLS = {
+    "version": 2,
+    "knobs": [{"turn": "volume", "press": "mute"}, {"turn": "track", "press": "play_pause"},
+              {"turn": "brightness", "press": "none"}],
+    "buttons": [{"action": "previous"}, {"action": "play_pause"}, {"action": "next"}],
+}
+
+
 def make_controller(tmp_path, hid=None, cfg=None):
     hid = hid or FakeHid()
     backend = RecordingBackend()
@@ -66,7 +87,7 @@ def make_controller(tmp_path, hid=None, cfg=None):
 
 
 def test_controller_sends_images_and_handles_inputs(tmp_path):
-    ctrl, backend, hid, _ = make_controller(tmp_path)
+    ctrl, backend, hid, _ = make_controller(tmp_path, cfg=MUSIC_CONTROLS)
     ctrl.start()
     try:
         assert wait_for(lambda: ctrl.status.startswith("Conectado"))
@@ -134,7 +155,7 @@ def test_no_device_found_keeps_rendering(tmp_path):
 
 
 def test_knob_track_debounce_and_brightness_saved(tmp_path):
-    ctrl, backend, hid, _ = make_controller(tmp_path)
+    ctrl, backend, hid, _ = make_controller(tmp_path, cfg=MUSIC_CONTROLS)
     ctrl.knob_turn("track", 1)
     ctrl.knob_turn("track", 1)
     ctrl.knob_turn("brightness", -1)
@@ -158,5 +179,64 @@ def test_apply_config_changes_layout(tmp_path):
         ctrl.apply_config(new)
         assert ctrl.renderer.config is new
         assert ctrl.device is not None
+    finally:
+        ctrl.stop()
+
+
+def test_default_knobs_app_volume_and_mic(tmp_path):
+    """Asignación por defecto: perilla 1 = volumen de la app, perilla 2 = PC + micrófono."""
+    ctrl, backend, hid, _ = make_controller(tmp_path)
+    ctrl.start()
+    try:
+        assert wait_for(lambda: ctrl.state.app_volume == 70)
+        hid.reports += [make_report(0x91)] * 2  # perilla 1 +
+        assert wait_for(lambda: backend.app_volume == 74)
+        assert backend.volume == 40  # el volumen general no cambia
+        hid.reports += [make_report(0x50)]  # perilla 2 -
+        assert wait_for(lambda: backend.volume == 38)
+        hid.reports += [make_report(0x35)]  # presionar perilla 2
+        assert wait_for(lambda: backend.mic is True)
+        assert wait_for(lambda: ctrl._overlay is not None and ctrl._overlay.text == "Mic OFF")
+        assert ctrl.state.mic_muted is True
+    finally:
+        ctrl.stop()
+
+
+def test_app_volume_falls_back_to_master_when_no_app(tmp_path):
+    ctrl, backend, hid, _ = make_controller(tmp_path)
+    ctrl.state = MediaState(volume=50)
+    ctrl.change_app_volume(4)
+    assert ctrl.state.volume == 54
+    assert ctrl._overlay.subtitle == "Volumen PC"
+
+
+def test_obs_buttons_show_feedback(tmp_path):
+    ctrl, backend, hid, _ = make_controller(tmp_path)
+    calls = []
+
+    class FakeObs:
+        def run(self, action, target=None):
+            from akp03.obs import Feedback
+            calls.append((action, target))
+            return Feedback("record", "Grabando", True)
+
+    ctrl.obs = type("X", (), {"run": FakeObs().run, "client": type("C", (), {"close": lambda s: None,
+                                                                              "configure": lambda s, *a: None})()})()
+    ctrl.start()
+    try:
+        hid.reports += [make_report(0x25)]  # botón 1 = OBS grabar
+        assert wait_for(lambda: calls == [("obs_record", None)])
+        assert wait_for(lambda: ctrl._overlay is not None and ctrl._overlay.text == "Grabando")
+    finally:
+        ctrl.stop()
+
+
+def test_obs_error_is_reported_not_raised(tmp_path):
+    ctrl, backend, hid, _ = make_controller(tmp_path, cfg={"obs": {"port": 1}})
+    ctrl.start()
+    try:
+        ctrl.do_action("obs_stream")
+        assert wait_for(lambda: ctrl.obs_status != "", 5)
+        assert ctrl._overlay.subtitle == "OBS" and ctrl._overlay.alert
     finally:
         ctrl.stop()

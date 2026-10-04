@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
@@ -70,6 +71,69 @@ def fmt_time(seconds: Optional[float]) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+@dataclass(frozen=True)
+class Overlay:
+    """Aviso temporal (volumen, micrófono, OBS…) que se dibuja sobre el panel."""
+
+    icon: str
+    text: str
+    subtitle: str = ""
+    frac: Optional[float] = None  # barra 0-1 (p. ej. volumen)
+    alert: bool = False  # en rojo (silenciado, grabando…)
+
+
+def fit_text(draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int,
+             min_size: int, bold: bool = True):
+    """Fuente más grande que hace caber `text`; si no cabe, se recorta con «…»."""
+    for sz in range(size, min_size - 1, -1):
+        fnt = font(sz, bold)
+        if text_width(draw, text, fnt) <= max_width:
+            return fnt, text
+    fnt = font(min_size, bold)
+    while len(text) > 1 and text_width(draw, text + "…", fnt) > max_width:
+        text = text[:-1]
+    return fnt, text.rstrip() + "…"
+
+
+def fit_lines(draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int,
+              min_size: int, bold: bool = True):
+    """Como fit_text pero permite partir el texto en dos líneas."""
+    single_min = max(min_size, int(size * 0.7))
+    for sz in range(size, single_min - 1, -1):
+        fnt = font(sz, bold)
+        if text_width(draw, text, fnt) <= max_width:
+            return fnt, [text]
+    words = text.split()
+    if len(words) > 1:
+        for sz in range(single_min, min_size - 1, -1):
+            fnt = font(sz, bold)
+            best = None
+            for i in range(1, len(words)):
+                a, b = " ".join(words[:i]), " ".join(words[i:])
+                wa, wb = text_width(draw, a, fnt), text_width(draw, b, fnt)
+                if wa <= max_width and wb <= max_width:
+                    score = max(wa, wb)
+                    if best is None or score < best[0]:
+                        best = (score, [a, b])
+            if best:
+                return fnt, best[1]
+        # Dos líneas: la segunda se recorta si hace falta.
+        fnt = font(min_size, bold)
+        first = words[0]
+        for i in range(len(words) - 1, 0, -1):
+            if text_width(draw, " ".join(words[:i]), fnt) <= max_width:
+                first = " ".join(words[:i])
+                rest = " ".join(words[i:])
+                break
+        else:
+            rest = " ".join(words[1:])
+        _, first = fit_text(draw, first, max_width, min_size, min_size, bold)
+        _, rest = fit_text(draw, rest, max_width, min_size, min_size, bold)
+        return fnt, [first, rest]
+    return fit_text(draw, text, max_width, min_size, min_size, bold)[0], \
+        [fit_text(draw, text, max_width, min_size, min_size, bold)[1]]
 
 
 # --------------------------------------------------------------------- imágenes propias
@@ -268,31 +332,47 @@ class Renderer:
             return blur.copy()
         return self._blank(w)
 
+    def _draw_overlay(self, img: Image.Image, n: int, ov: Overlay) -> None:
+        s = self.size
+        w = s * n
+        d = ImageDraw.Draw(img)
+        pad = max(3, s // 12)
+        color = RED if ov.alert else WHITE
+        bar_color = RED if ov.alert else self.theme + (255,)
+        if n >= 2:
+            # Icono (y subtítulo) en la primera tecla y el texto en las demás: el
+            # hueco físico entre teclas no corta las letras.
+            if ov.subtitle:
+                f, sub = fit_text(d, ov.subtitle, s - 2 * pad, max(7, int(s * 0.16)), 6, False)
+                d.text((s // 2, int(s * 0.13)), sub, font=f, fill=GREY, anchor="mm")
+            cy = int(s * 0.47) if ov.subtitle else int(s * 0.40)
+            self._paste_icon(img, ov.icon, 0.46, color, center=(s // 2, cy))
+            f, lines = fit_lines(d, ov.text, w - s - 2 * pad, max(10, int(s * 0.30)), max(7, int(s * 0.16)))
+            cx, cy = s + (w - s) // 2, int(s * 0.42)
+            if len(lines) == 1:
+                d.text((cx, cy), lines[0], font=f, fill=color, anchor="mm")
+            else:
+                gap = int(f.size * 0.6) if hasattr(f, "size") else 6
+                d.text((cx, cy - gap), lines[0], font=f, fill=color, anchor="mm")
+                d.text((cx, cy + gap), lines[1], font=f, fill=color, anchor="mm")
+        else:
+            self._paste_icon(img, ov.icon, 0.36, color, center=(s // 2, int(s * 0.26)))
+            f, text = fit_text(d, ov.text, s - 2 * pad, max(9, int(s * 0.24)), max(6, int(s * 0.13)))
+            d.text((s // 2, int(s * 0.62)), text, font=f, fill=color, anchor="mm")
+        if ov.frac is not None:
+            y = int(s * 0.82)
+            self._bar(img, pad, y, w - pad, y + max(3, s // 15), ov.frac, bar_color)
+
     def _render_panel(self, key: dict, n: int, state: MediaState, now: float,
-                      volume_overlay: bool) -> Image.Image:
+                      overlay: Optional[Overlay]) -> Image.Image:
         s = self.size
         w = s * n
         img = self._panel_background(key, state, now, w)
         d = ImageDraw.Draw(img)
         pad = max(3, s // 12)
 
-        if volume_overlay and state.volume is not None:
-            name = "mute" if state.muted else "volume"
-            label = "Mute" if state.muted else f"{state.volume}%"
-            cy = s // 2 - s // 10
-            if n >= 2:
-                # Icono en una tecla y número en la otra: el hueco físico entre
-                # teclas no corta el texto.
-                self._paste_icon(img, name, 0.55, center=(s // 2, cy))
-                f = font(max(10, int(s * 0.30)), True)
-                d.text((s + s // 2, cy), label, font=f, fill=WHITE, anchor="mm")
-            else:
-                self._paste_icon(img, name, 0.30, center=(s // 2, int(s * 0.22)))
-                f = font(max(9, int(s * 0.24)), True)
-                d.text((s // 2, int(s * 0.55)), label, font=f, fill=WHITE, anchor="mm")
-            color = RED if state.muted else self.theme + (255,)
-            self._bar(img, pad, int(s * 0.80), w - pad, int(s * 0.80) + max(3, s // 15),
-                      state.volume / 100, color)
+        if overlay is not None:
+            self._draw_overlay(img, n, overlay)
             return img
 
         if not state.has_media:
@@ -349,6 +429,9 @@ class Renderer:
                              (15, 15, 15, 255) if custom is None else WHITE)
         elif ktype == "mute":
             self._paste_icon(img, "mute", 0.6, RED if state.muted else WHITE)
+        elif ktype == "mic":
+            self._paste_icon(img, "mic_off" if state.mic_muted else "mic", 0.6,
+                             RED if state.mic_muted else WHITE)
         else:
             self._paste_icon(img, ICON_FOR_TYPE.get(ktype, "music"), 0.56)
         return img
@@ -392,7 +475,7 @@ class Renderer:
 
     # ------------------------------------------------------------ API
     def render(self, state: MediaState, now: Optional[float] = None,
-               volume_overlay: bool = False) -> list[Image.Image]:
+               overlay: Optional[Overlay] = None) -> list[Image.Image]:
         """Devuelve una imagen RGB por tecla (6)."""
         now = time.monotonic() if now is None else now
         if state.track_key != self._track_key:
@@ -410,7 +493,7 @@ class Renderer:
                 while j + 1 < len(keys) and keys[j + 1]["type"] == "now_playing":
                     j += 1
                 n = j - i + 1
-                panel = self._render_panel(keys[i], n, state, now, volume_overlay)
+                panel = self._render_panel(keys[i], n, state, now, overlay)
                 for k in range(n):
                     out[i + k] = panel.crop((k * self.size, 0, (k + 1) * self.size, self.size))
                 i = j + 1
@@ -423,11 +506,12 @@ class Renderer:
                 continue
             ktype = key["type"]
             if ktype == "cover":
-                if volume_overlay and not has_panel and state.volume is not None:
-                    img = self._render_volume(key, state, now)
+                if overlay is not None and not has_panel:
+                    img = self._darken(self._render_cover(key, state, now), 0.35)
+                    self._draw_overlay(img, 1, overlay)
                 else:
                     img = self._render_cover(key, state, now)
-            elif ktype in ("previous", "next", "play_pause", "mute", "volume_up", "volume_down"):
+            elif ktype in ("previous", "next", "play_pause", "mute", "mic", "volume_up", "volume_down"):
                 img = self._render_button(key, state, now)
             elif ktype == "volume":
                 img = self._render_volume(key, state, now)

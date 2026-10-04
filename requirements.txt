@@ -1,5 +1,6 @@
 pillow>=10.1
 hidapi>=0.14
+websocket-client>=1.6
 
 # Windows: información de lo que suena (Spotify, YouTube, etc.), volumen y bandeja
 winrt-runtime>=2.0; sys_platform == "win32"

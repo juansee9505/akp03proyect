@@ -5,7 +5,7 @@ from PIL import Image
 from akp03.config import normalize
 from akp03.media.base import MediaState, pretty_app_name
 from akp03.media.demo import DemoBackend
-from akp03.render import AnimatedImage, Renderer, encode_key, fmt_time
+from akp03.render import AnimatedImage, Overlay, Renderer, encode_key, fmt_time
 
 
 def _gif(path, colors):
@@ -23,7 +23,7 @@ def test_render_default_layout():
 
 
 def test_render_without_media_and_all_types():
-    types = ["volume", "volume_up", "volume_down", "mute", "clock", "none"]
+    types = ["volume", "volume_up", "volume_down", "mute", "clock", "mic"]
     cfg = normalize({"keys": [{"type": t} for t in types]})
     imgs = Renderer(cfg).render(MediaState(volume=30, muted=True))
     assert len(imgs) == 6
@@ -45,8 +45,19 @@ def test_volume_overlay_changes_panel():
     r = Renderer(normalize({}))
     state = MediaState(title="x", artist="y", volume=50, status="playing")
     normal = r.render(state, now=1.0)
-    overlay = r.render(state, now=1.0, volume_overlay=True)
+    overlay = r.render(state, now=1.0, overlay=Overlay("volume", "50%", "Spotify", 0.5))
     assert normal[1].tobytes() != overlay[1].tobytes()
+
+
+def test_overlay_long_text_and_without_panel():
+    ov = Overlay("scene", "Una escena con un nombre larguísimo de verdad", "Escena", alert=True)
+    assert len(Renderer(normalize({})).render(MediaState(), overlay=ov)) == 6
+    cfg = normalize({"keys": [{"type": "cover"}, {"type": "mic"}, {"type": "none"}]})
+    r = Renderer(cfg)
+    plain = r.render(MediaState(mic_muted=True))
+    with_ov = r.render(MediaState(mic_muted=True), overlay=ov)
+    assert plain[0].tobytes() != with_ov[0].tobytes()  # sin panel, el aviso va en la carátula
+    assert plain[1].getpixel((30, 20))[0] > plain[1].getpixel((30, 20))[1]  # mic silenciado en rojo
 
 
 def test_custom_gif_animates(tmp_path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -10,7 +11,7 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
-from .base import MediaBackend, MediaState, pretty_app_name
+from .base import MediaBackend, MediaState, pretty_app_name, process_stems
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class LinuxMediaBackend(MediaBackend):
         vol = self._read_volume()
         if vol:
             state.volume, state.muted = vol
+        state.mic_muted = self._mic_muted()
         self._player = self._pick_player()
         if not self._player:
             return state
@@ -105,6 +107,9 @@ class LinuxMediaBackend(MediaBackend):
             pass
         state.art_key = state.track_key + "|" + art_url
         state.art = self._fetch_art(art_url)
+        app_vol = self._app_volume(player)
+        if app_vol:
+            state.app_volume, state.app_muted = app_vol[1], app_vol[2]
         return state
 
     def play_pause(self):
@@ -151,3 +156,67 @@ class LinuxMediaBackend(MediaBackend):
             _run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle")
         elif self._pactl:
             _run("pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle")
+
+    # ----------------------------------------------------------- micrófono
+    def _mic_muted(self) -> Optional[bool]:
+        if self._wpctl:
+            out = _run("wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@")
+            if out is not None:
+                return "MUTED" in out
+        if self._pactl:
+            out = _run("pactl", "get-source-mute", "@DEFAULT_SOURCE@")
+            if out is not None:
+                return "yes" in out
+        return None
+
+    def toggle_mic_mute(self) -> Optional[bool]:
+        if self._wpctl:
+            _run("wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle")
+        elif self._pactl:
+            _run("pactl", "set-source-mute", "@DEFAULT_SOURCE@", "toggle")
+        return self._mic_muted()
+
+    # ----------------------------------------------------------- volumen por app
+    def _sink_inputs(self, player: str) -> list[dict]:
+        if not self._pactl or not player:
+            return []
+        out = _run("pactl", "-f", "json", "list", "sink-inputs")
+        try:
+            items = json.loads(out or "[]")
+        except ValueError:
+            return []
+        stems = process_stems(player) | {player.split(".")[0].lower()}
+        found = []
+        for item in items:
+            props = item.get("properties", {})
+            names = {str(props.get("application.process.binary", "")).lower(),
+                     str(props.get("application.name", "")).lower()}
+            if names & stems:
+                found.append(item)
+        return found
+
+    def _app_volume(self, player: str):
+        inputs = self._sink_inputs(player)
+        if not inputs:
+            return None
+        item = inputs[0]
+        channels = list((item.get("volume") or {}).values())
+        try:
+            pct = int(str(channels[0]["value_percent"]).rstrip("%")) if channels else None
+        except (KeyError, ValueError, TypeError):
+            pct = None
+        if pct is None:
+            return None
+        return item, pct, bool(item.get("mute"))
+
+    def set_app_volume(self, percent) -> bool:
+        inputs = self._sink_inputs(self._player or "")
+        for item in inputs:
+            _run("pactl", "set-sink-input-volume", str(item["index"]), f"{max(0, min(100, int(percent)))}%")
+        return bool(inputs)
+
+    def toggle_app_mute(self) -> bool:
+        inputs = self._sink_inputs(self._player or "")
+        for item in inputs:
+            _run("pactl", "set-sink-input-mute", str(item["index"]), "toggle")
+        return bool(inputs)

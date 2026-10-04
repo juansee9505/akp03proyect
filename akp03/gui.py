@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -14,6 +15,7 @@ from PIL import Image, ImageDraw, ImageTk
 from . import APP_NAME, __version__, autostart
 from .config import (ACTIONS, KEY_TYPES, KNOB_TURN_ACTIONS, NUM_BUTTONS, NUM_KEYS, NUM_KNOBS,
                      import_media_file, normalize)
+from .obs import OBSActions, OBSClient, OBSError
 from .controller import Controller
 from .device import InputEvent
 from .icons import icon
@@ -31,6 +33,7 @@ KEY_TYPE_LABELS = {
     "volume_up": "Subir volumen",
     "volume_down": "Bajar volumen",
     "mute": "Silenciar",
+    "mic": "Micrófono (silenciar)",
     "clock": "Reloj",
     "image": "Imagen / animación propia",
     "none": "Vacía",
@@ -39,19 +42,31 @@ ACTION_LABELS = {
     "play_pause": "Play / Pausa",
     "next": "Canción siguiente",
     "previous": "Canción anterior",
-    "volume_up": "Subir volumen",
-    "volume_down": "Bajar volumen",
-    "mute": "Silenciar / activar sonido",
+    "app_mute": "Silenciar la música (app)",
+    "volume_up": "Subir volumen del PC",
+    "volume_down": "Bajar volumen del PC",
+    "mute": "Silenciar el PC",
+    "mic_mute": "Silenciar micrófono",
     "brightness_up": "Subir brillo",
     "brightness_down": "Bajar brillo",
-    "open": "Abrir programa / URL",
+    "obs_record": "OBS: grabar / detener",
+    "obs_record_pause": "OBS: pausar grabación",
+    "obs_stream": "OBS: transmitir / detener",
+    "obs_replay": "OBS: guardar repetición",
+    "obs_virtualcam": "OBS: cámara virtual",
+    "obs_scene": "OBS: ir a la escena…",
+    "obs_mute": "OBS: silenciar fuente…",
+    "open": "Abrir programa / URL…",
     "none": "Nada",
 }
 KNOB_LABELS = {
-    "volume": "Volumen",
+    "app_volume": "Volumen de la música (app)",
+    "volume": "Volumen general del PC",
     "track": "Cambiar canción",
     "seek": "Adelantar / retroceder",
     "brightness": "Brillo de la pantalla",
+    "obs_scene_cycle": "OBS: cambiar de escena",
+    "obs_volume": "OBS: volumen de una fuente…",
     "none": "Nada",
 }
 AUTO_ACTION = "Automática (según el tipo)"
@@ -221,6 +236,7 @@ class App:
         right.grid(row=0, column=1, sticky="nsew")
         right.add(self._build_keys_tab(right), text="Teclas")
         right.add(self._build_controls_tab(right), text="Perillas y botones")
+        right.add(self._build_obs_tab(right), text="OBS")
         right.add(self._build_look_tab(right), text="Apariencia")
         right.add(self._build_device_tab(right), text="Dispositivo")
         right.add(self._build_general_tab(right), text="General")
@@ -342,38 +358,55 @@ class App:
         f = ttk.Frame(parent, padding=12)
         f.columnconfigure(1, weight=1)
         f.columnconfigure(2, weight=1)
-        ttk.Label(f, text="Al girar").grid(row=0, column=1, sticky="w")
-        ttk.Label(f, text="Al presionar").grid(row=0, column=2, sticky="w")
+        f.columnconfigure(3, weight=1)
+        ttk.Label(f, text=("Gira o presiona una rueda del AKP03 y se marcará aquí cuál es "
+                           "(así sabes cuál es la grande)."),
+                  foreground="#666", wraplength=460).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        ttk.Label(f, text="Al girar").grid(row=1, column=1, sticky="w")
+        ttk.Label(f, text="Al presionar").grid(row=1, column=2, sticky="w")
+        ttk.Label(f, text="Fuente OBS").grid(row=1, column=3, sticky="w")
         self.knob_vars = []
+        self.knob_name_labels: list[ttk.Label] = []
+        self.target_boxes: list[ttk.Combobox] = []
         for k in range(NUM_KNOBS):
-            ttk.Label(f, text=f"Perilla {k + 1}").grid(row=k + 1, column=0, sticky="w", pady=3)
-            tv, pv = tk.StringVar(), tk.StringVar()
-            cb1 = ttk.Combobox(f, textvariable=tv, state="readonly",
+            name = ttk.Label(f, text=f"Perilla {k + 1}", width=13)
+            name.grid(row=k + 2, column=0, sticky="w", pady=3)
+            self.knob_name_labels.append(name)
+            tv, pv, gv = tk.StringVar(), tk.StringVar(), tk.StringVar()
+            cb1 = ttk.Combobox(f, textvariable=tv, state="readonly", width=21,
                                values=[KNOB_LABELS[a] for a in KNOB_TURN_ACTIONS])
-            cb2 = ttk.Combobox(f, textvariable=pv, state="readonly",
+            cb2 = ttk.Combobox(f, textvariable=pv, state="readonly", width=19,
                                values=[ACTION_LABELS[a] for a in ACTIONS if a != "open"])
-            cb1.grid(row=k + 1, column=1, sticky="ew", padx=3)
-            cb2.grid(row=k + 1, column=2, sticky="ew", padx=3)
-            for cb in (cb1, cb2):
+            cb3 = ttk.Combobox(f, textvariable=gv, width=12)
+            cb1.grid(row=k + 2, column=1, sticky="ew", padx=3)
+            cb2.grid(row=k + 2, column=2, sticky="ew", padx=3)
+            cb3.grid(row=k + 2, column=3, sticky="ew", padx=3)
+            self.target_boxes.append(cb3)
+            for cb in (cb1, cb2, cb3):
                 cb.bind("<<ComboboxSelected>>", lambda e: self._controls_changed())
+            cb3.bind("<FocusOut>", lambda e: self._controls_changed())
+            cb3.bind("<Return>", lambda e: self._controls_changed())
             knob = self.cfg["knobs"][k]
             tv.set(KNOB_LABELS[knob["turn"]])
             pv.set(ACTION_LABELS[knob["press"]])
-            self.knob_vars.append((tv, pv))
+            gv.set(knob.get("target") or "")
+            self.knob_vars.append((tv, pv, gv))
 
-        ttk.Separator(f).grid(row=5, column=0, columnspan=3, sticky="ew", pady=12)
-        ttk.Label(f, text="Acción").grid(row=6, column=1, sticky="w")
-        ttk.Label(f, text="Programa / URL (si la acción es «Abrir»)").grid(row=6, column=2, sticky="w")
+        ttk.Separator(f).grid(row=5, column=0, columnspan=4, sticky="ew", pady=12)
+        ttk.Label(f, text="Acción").grid(row=6, column=1, columnspan=2, sticky="w")
+        ttk.Label(f, text="Escena / fuente").grid(row=6, column=3, sticky="w")
         self.button_vars = []
         for b in range(NUM_BUTTONS):
             ttk.Label(f, text=f"Botón {b + 1}").grid(row=b + 7, column=0, sticky="w", pady=3)
             av, tv = tk.StringVar(), tk.StringVar()
             cb = ttk.Combobox(f, textvariable=av, state="readonly",
                               values=[ACTION_LABELS[a] for a in ACTIONS])
-            cb.grid(row=b + 7, column=1, sticky="ew", padx=3)
+            cb.grid(row=b + 7, column=1, columnspan=2, sticky="ew", padx=3)
             cb.bind("<<ComboboxSelected>>", lambda e: self._controls_changed())
-            e = ttk.Entry(f, textvariable=tv)
-            e.grid(row=b + 7, column=2, sticky="ew", padx=3)
+            e = ttk.Combobox(f, textvariable=tv, width=12)
+            e.grid(row=b + 7, column=3, sticky="ew", padx=3)
+            self.target_boxes.append(e)
+            e.bind("<<ComboboxSelected>>", lambda ev: self._controls_changed())
             e.bind("<FocusOut>", lambda ev: self._controls_changed())
             e.bind("<Return>", lambda ev: self._controls_changed())
             btn = self.cfg["buttons"][b]
@@ -381,13 +414,18 @@ class App:
             tv.set(btn.get("target") or "")
             self.button_vars.append((av, tv))
 
-        ttk.Separator(f).grid(row=10, column=0, columnspan=3, sticky="ew", pady=12)
+        ttk.Separator(f).grid(row=10, column=0, columnspan=4, sticky="ew", pady=12)
         self.vol_step_var = tk.IntVar(value=self.cfg["volume_step"])
         ttk.Label(f, text="Paso de volumen por clic (%)").grid(row=11, column=0, columnspan=2, sticky="w")
         sp = ttk.Spinbox(f, from_=1, to=20, textvariable=self.vol_step_var, width=6,
                          command=self._controls_changed)
         sp.grid(row=11, column=2, sticky="w")
         sp.bind("<FocusOut>", lambda e: self._controls_changed())
+        ttk.Label(f, text=("Las opciones con «…» usan la columna de la derecha: nombre de la "
+                           "escena o fuente de audio de OBS (p. ej. «Mic/Aux»), o el programa/URL. "
+                           "Pulsa «Probar conexión» en la pestaña OBS para elegirlas de una lista."),
+                  foreground="#666", wraplength=460, justify="left").grid(
+            row=12, column=0, columnspan=4, sticky="w", pady=(10, 0))
         return f
 
     def _controls_changed(self):
@@ -395,9 +433,10 @@ class App:
         actions = _inverse(ACTION_LABELS)
 
         def fn(cfg):
-            for k, (tv, pv) in enumerate(self.knob_vars):
+            for k, (tv, pv, gv) in enumerate(self.knob_vars):
                 cfg["knobs"][k]["turn"] = turns.get(tv.get(), "none")
                 cfg["knobs"][k]["press"] = actions.get(pv.get(), "none")
+                cfg["knobs"][k]["target"] = gv.get().strip() or None
             for b, (av, tv) in enumerate(self.button_vars):
                 cfg["buttons"][b]["action"] = actions.get(av.get(), "none")
                 cfg["buttons"][b]["target"] = tv.get().strip() or None
@@ -407,6 +446,81 @@ class App:
                 pass
 
         self._update(fn)
+
+    # ---------------------------------------------------------------- OBS
+    def _build_obs_tab(self, parent):
+        f = ttk.Frame(parent, padding=12)
+        f.columnconfigure(1, weight=1)
+        obs = self.cfg["obs"]
+        ttk.Label(f, text=(
+            "En OBS: Herramientas → Ajustes del servidor WebSocket → marca «Habilitar servidor "
+            "WebSocket». Pulsa «Mostrar información de conexión» y copia aquí la contraseña."),
+            foreground="#666", wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(f, text="Servidor").grid(row=1, column=0, sticky="w")
+        self.obs_host_var = tk.StringVar(value=obs["host"])
+        ttk.Entry(f, textvariable=self.obs_host_var, width=20).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(f, text="Puerto").grid(row=2, column=0, sticky="w")
+        self.obs_port_var = tk.StringVar(value=str(obs["port"]))
+        ttk.Entry(f, textvariable=self.obs_port_var, width=8).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(f, text="Contraseña").grid(row=3, column=0, sticky="w")
+        self.obs_pass_var = tk.StringVar(value=obs["password"])
+        ttk.Entry(f, textvariable=self.obs_pass_var, show="•", width=28).grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(f, text="Paso de volumen OBS (dB)").grid(row=4, column=0, sticky="w")
+        self.obs_step_var = tk.StringVar(value=str(self.cfg["obs_volume_step_db"]))
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.obs_step_var, width=6).grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Button(f, text="Guardar y probar conexión", command=self._obs_test).grid(
+            row=5, column=1, sticky="w", pady=(8, 4))
+        self.obs_result_var = tk.StringVar()
+        ttk.Label(f, textvariable=self.obs_result_var, wraplength=460, justify="left").grid(
+            row=6, column=0, columnspan=2, sticky="w")
+        self.obs_lists = tk.Text(f, height=10, width=60)
+        self.obs_lists.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        self.obs_lists.configure(state="disabled")
+        f.rowconfigure(7, weight=1)
+        return f
+
+    def _obs_test(self):
+        try:
+            port = int(self.obs_port_var.get())
+            step = max(1, min(10, int(float(self.obs_step_var.get()))))
+        except ValueError:
+            messagebox.showerror(APP_NAME, "Puerto o paso inválido")
+            return
+        host, password = self.obs_host_var.get().strip() or "localhost", self.obs_pass_var.get()
+
+        def fn(cfg):
+            cfg["obs"].update({"host": host, "port": port, "password": password})
+            cfg["obs_volume_step_db"] = step
+
+        self._update(fn)
+        self.obs_result_var.set("Conectando…")
+
+        def work():
+            client = OBSClient(host, port, password)
+            try:
+                scenes, inputs = OBSActions(client).lists()
+                result = ("ok", scenes, inputs)
+            except OBSError as exc:
+                result = ("error", str(exc), None)
+            finally:
+                client.close()
+            self.root.after(0, lambda: self._obs_show(result))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _obs_show(self, result):
+        kind, a, b = result
+        self.obs_lists.configure(state="normal")
+        self.obs_lists.delete("1.0", "end")
+        if kind == "error":
+            self.obs_result_var.set(f"✗ {a}")
+        else:
+            self.obs_result_var.set("✓ Conectado con OBS")
+            self.obs_lists.insert("end", "Escenas:\n" + "\n".join(f"  {x}" for x in a) +
+                                  "\n\nFuentes:\n" + "\n".join(f"  {x}" for x in b))
+            for box in self.target_boxes:
+                box.configure(values=list(a) + list(b))
+        self.obs_lists.configure(state="disabled")
 
     # ---------------------------------------------------------------- apariencia
     def _build_look_tab(self, parent):
@@ -612,16 +726,29 @@ class App:
     def _refresh(self):
         self.status_var.set(self.ctrl.status)
         st = self.ctrl.state
+        extras = []
+        if st.app_volume is not None:
+            extras.append(f"{st.app}: {st.app_volume}%" + (" (silenciado)" if st.app_muted else ""))
+        if st.volume is not None:
+            extras.append(f"PC: {st.volume}%" + (" (silenciado)" if st.muted else ""))
+        if st.mic_muted is not None:
+            extras.append("Mic: " + ("silenciado" if st.mic_muted else "activo"))
         if st.has_media:
             self.title_var.set(st.title or "—")
-            self.artist_var.set(st.artist)
-            vol = "" if st.volume is None else f" · Volumen {st.volume}%" + (" (silenciado)" if st.muted else "")
             estado = {"playing": "Reproduciendo", "paused": "En pausa"}.get(st.status, st.status)
-            self.app_var.set(f"{st.app} · {estado}{vol}")
+            self.artist_var.set(f"{st.artist}  ·  {st.app} · {estado}" if st.artist else f"{st.app} · {estado}")
         else:
             self.title_var.set("No se está reproduciendo nada")
             self.artist_var.set("")
-            self.app_var.set("" if st.volume is None else f"Volumen {st.volume}%")
+        self.app_var.set("  ·  ".join(extras))
+
+        idx, when = self.ctrl.last_knob
+        recent = time.monotonic() - when < 4
+        for k, lbl in enumerate(self.knob_name_labels):
+            if recent and k == idx:
+                lbl.configure(text=f"Perilla {k + 1} ◀", foreground="#1DB954")
+            else:
+                lbl.configure(text=f"Perilla {k + 1}", foreground="")
 
         if self.ctrl.frame_id != self._last_frame_id and self.ctrl.last_frame:
             self._last_frame_id = self.ctrl.frame_id

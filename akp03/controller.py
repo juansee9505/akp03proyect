@@ -15,7 +15,8 @@ from typing import Callable, Optional
 from .config import DEFAULT_KEY_ACTION, NUM_KEYS, save_config
 from .device import AKP03Device, DeviceError, InputEvent, build_input_map, parse_report
 from .media.base import MediaBackend, MediaState
-from .render import Renderer, encode_key
+from .obs import OBSActions, OBSClient, OBSConnectionLost, OBSError
+from .render import Overlay, Renderer, encode_key
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,10 @@ class Controller:
         self.last_frame: list = []
         self.frame_id = 0
         self.input_log: list[str] = []
+        self.obs_status = ""
+        self.last_knob: tuple[int, float] = (-1, 0.0)  # (índice, momento) de la última perilla usada
+        obs_cfg = config["obs"]
+        self.obs = OBSActions(OBSClient(obs_cfg["host"], obs_cfg["port"], obs_cfg["password"]))
 
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -83,8 +88,12 @@ class Controller:
 
         self._last_sent: list[Optional[bytes]] = [None] * NUM_KEYS
         self._device_failed = threading.Event()
-        self._volume_overlay_until = 0.0
+        self._overlay: Optional[Overlay] = None
+        self._overlay_until = 0.0
         self._local_volume_until = 0.0
+        self._local_app_volume_until = 0.0
+        self._local_mic_until = 0.0
+        self._last_scene_knob = 0.0
         self._local_status_until = 0.0
         self._last_track_knob = 0.0
         self._identify_until = 0.0
@@ -106,6 +115,7 @@ class Controller:
         for t in self._threads:
             t.join(timeout=3)
         self._close_device(blank=True)
+        self.obs.client.close()
         if self._save_at is not None:
             self._save()
         try:
@@ -127,6 +137,8 @@ class Controller:
             self._last_sent = [None] * NUM_KEYS
             new_dev = config["device"]
             reconnect = any(old_dev.get(k) != new_dev.get(k) for k in ("vid", "pid", "packet_size"))
+        obs_cfg = config["obs"]
+        self.obs.client.configure(obs_cfg["host"], obs_cfg["port"], obs_cfg["password"])
         if self.device is not None:
             if reconnect:
                 self._device_failed.set()
@@ -286,7 +298,8 @@ class Controller:
             return self.renderer.render_identify()
         with self._lock:
             state = self.state
-        return self.renderer.render(state, now, volume_overlay=now < self._volume_overlay_until)
+        overlay = self._overlay if now < self._overlay_until else None
+        return self.renderer.render(state, now, overlay=overlay)
 
     def _media_loop(self) -> None:
         while not self._stop.is_set():
@@ -304,7 +317,11 @@ class Controller:
                     elif prev.volume is not None and st.volume is not None and (
                             st.volume != prev.volume or st.muted != prev.muted):
                         # El volumen cambió desde fuera (teclado, Windows): muéstralo.
-                        self._volume_overlay_until = now + self.config["display"]["volume_overlay_seconds"]
+                        self.show_overlay(self._master_overlay(st))
+                    if now < self._local_app_volume_until and st.app == prev.app:
+                        st = st.copy(app_volume=prev.app_volume, app_muted=prev.app_muted)
+                    if now < self._local_mic_until:
+                        st = st.copy(mic_muted=prev.mic_muted)
                     if now < self._local_status_until and st.track_key == prev.track_key:
                         st = st.copy(status=prev.status)
                     self.state = st
@@ -355,14 +372,41 @@ class Controller:
             self.do_action(btn.get("action", "none"), btn.get("target"))
         elif ev.control == "knob" and 0 <= ev.index < len(cfg["knobs"]):
             knob = cfg["knobs"][ev.index]
+            self.last_knob = (ev.index, time.monotonic())
             if ev.kind == "turn":
-                self.knob_turn(knob.get("turn", "none"), ev.value)
+                self.knob_turn(knob.get("turn", "none"), ev.value, knob.get("target"))
             elif ev.kind == "press":
-                self.do_action(knob.get("press", "none"))
+                self.do_action(knob.get("press", "none"), knob.get("target"))
         elif ev.control == "unknown":
             log.info("Entrada desconocida, código %#04x. Puedes mapearla en "
                      "device.input_map de la configuración.", ev.code)
 
+    # ================================================================ avisos en pantalla
+    def show_overlay(self, overlay: Overlay, seconds: Optional[float] = None) -> None:
+        self._overlay = overlay
+        self._overlay_until = time.monotonic() + (
+            seconds if seconds is not None else float(self.config["display"]["volume_overlay_seconds"]))
+
+    @staticmethod
+    def _master_overlay(st: MediaState) -> Overlay:
+        vol = st.volume or 0
+        return Overlay("mute" if st.muted else "volume", "Mute" if st.muted else f"{vol}%",
+                       "Volumen PC", vol / 100, st.muted)
+
+    @staticmethod
+    def _app_overlay(st: MediaState) -> Overlay:
+        vol = st.app_volume or 0
+        return Overlay("mute" if st.app_muted else "volume", "Mute" if st.app_muted else f"{vol}%",
+                       st.app or "Música", vol / 100, st.app_muted)
+
+    @staticmethod
+    def _mic_overlay(muted: Optional[bool]) -> Overlay:
+        if muted is None:
+            return Overlay("mic", "Sin mic", "Micrófono")
+        return Overlay("mic_off" if muted else "mic", "Mic OFF" if muted else "Mic ON",
+                       "Micrófono", None, bool(muted))
+
+    # ================================================================ acciones
     def do_action(self, action: str, target: Optional[str] = None) -> None:
         now = time.monotonic()
         b = self.backend
@@ -386,26 +430,33 @@ class Controller:
             with self._lock:
                 self.state = self.state.copy(muted=not self.state.muted)
                 self._local_volume_until = now + 1.0
-                self._volume_overlay_until = now + self.config["display"]["volume_overlay_seconds"]
+                self.show_overlay(self._master_overlay(self.state))
             self._submit(b.toggle_mute)
+        elif action == "app_mute":
+            self._toggle_app_mute()
+        elif action == "mic_mute":
+            self._toggle_mic()
         elif action == "brightness_up":
             self.change_brightness(10)
         elif action == "brightness_down":
             self.change_brightness(-10)
+        elif action.startswith("obs_"):
+            self._submit(lambda: self._run_obs(lambda: self.obs.run(action, target)))
         elif action == "open" and target:
             self._submit(lambda: open_target(target))
 
-    def knob_turn(self, action: str, value: int) -> None:
-        if action == "volume":
+    def knob_turn(self, action: str, value: int, target: Optional[str] = None) -> None:
+        now = time.monotonic()
+        if action == "app_volume":
+            self.change_app_volume(value * int(self.config["volume_step"]))
+        elif action == "volume":
             self.change_volume(value * int(self.config["volume_step"]))
         elif action == "track":
-            now = time.monotonic()
             if now - self._last_track_knob >= TRACK_KNOB_DEBOUNCE:
                 self._last_track_knob = now
                 self.do_action("next" if value > 0 else "previous")
         elif action == "seek":
             delta = value * float(self.config["seek_step"])
-            now = time.monotonic()
             with self._lock:
                 pos = self.state.position_at(now)
                 if pos is not None:
@@ -414,23 +465,107 @@ class Controller:
             self._submit(lambda: self.backend.seek(delta))
         elif action == "brightness":
             self.change_brightness(value * 5)
+        elif action == "obs_scene_cycle":
+            if now - self._last_scene_knob >= TRACK_KNOB_DEBOUNCE:
+                self._last_scene_knob = now
+                self._submit(lambda: self._run_obs(lambda: self.obs.cycle_scene(value)))
+        elif action == "obs_volume":
+            step = value * float(self.config["obs_volume_step_db"])
+            self._submit(lambda: self._run_obs(lambda: self.obs.change_volume(target, step)))
+
+    def _run_obs(self, fn: Callable) -> None:
+        """Ejecuta una acción de OBS (en el hilo de acciones) y muestra el resultado."""
+        try:
+            fb = fn()
+        except OBSError as exc:
+            self.obs_status = str(exc)
+            log.warning("OBS: %s", exc)
+            if isinstance(exc, OBSConnectionLost) or "no está conectado" in str(exc):
+                text = "Cerrado"
+            elif "contraseña" in str(exc).lower():
+                text = "Clave mal"
+            else:
+                text = "Error"
+            self.show_overlay(Overlay("scene", text, "OBS", alert=True), 2.5)
+            return
+        self.obs_status = "Conectado"
+        self.show_overlay(Overlay(fb.icon, fb.text, fb.subtitle, fb.frac, fb.alert), 2.0)
 
     def change_volume(self, delta: int) -> None:
+        """Volumen general de Windows."""
         now = time.monotonic()
         with self._lock:
-            self._volume_overlay_until = now + self.config["display"]["volume_overlay_seconds"]
             current = self.state.volume
             if current is None:
                 target = None
+                self.show_overlay(Overlay("volume", "+" if delta > 0 else "−", "Volumen PC"))
             else:
                 target = max(0, min(100, current + delta))
                 muted = self.state.muted and not (delta > 0)
                 self.state = self.state.copy(volume=target, muted=muted)
                 self._local_volume_until = now + 1.0
+                self.show_overlay(self._master_overlay(self.state))
         if target is None:
             self._submit(lambda: self.backend.change_volume(delta))
         else:
             self._submit(lambda: self.backend.set_volume(target), coalesce_key="volume")
+
+    def change_app_volume(self, delta: int) -> None:
+        """Volumen sólo de la app que suena (Spotify, el navegador con YouTube…).
+
+        Si no se encuentra la app en el mezclador (p. ej. no suena nada), se
+        cambia el volumen general.
+        """
+        now = time.monotonic()
+        with self._lock:
+            current = self.state.app_volume
+            if current is not None:
+                target = max(0, min(100, current + delta))
+                muted = self.state.app_muted and not (delta > 0)
+                self.state = self.state.copy(app_volume=target, app_muted=muted)
+                self._local_app_volume_until = now + 1.0
+                self.show_overlay(self._app_overlay(self.state))
+        if current is None:
+            self.change_volume(delta)
+            return
+
+        def apply():
+            if not self.backend.set_app_volume(target):
+                log.debug("La app %s no está en el mezclador", self.state.app)
+
+        self._submit(apply, coalesce_key="app_volume")
+
+    def _toggle_app_mute(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if self.state.app_volume is None:
+                found = False
+            else:
+                found = True
+                self.state = self.state.copy(app_muted=not self.state.app_muted)
+                self._local_app_volume_until = now + 1.0
+                self.show_overlay(self._app_overlay(self.state))
+        if found:
+            self._submit(self.backend.toggle_app_mute)
+        else:
+            self.do_action("mute")
+
+    def _toggle_mic(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if self.state.mic_muted is not None:
+                self.state = self.state.copy(mic_muted=not self.state.mic_muted)
+                self._local_mic_until = now + 1.5
+                self.show_overlay(self._mic_overlay(self.state.mic_muted))
+
+        def apply():
+            new = self.backend.toggle_mic_mute()
+            with self._lock:
+                self.state = self.state.copy(mic_muted=new)
+                self._local_mic_until = time.monotonic() + 1.5
+            self.show_overlay(self._mic_overlay(new))
+
+        self._submit(apply)
 
     def change_brightness(self, delta: int) -> None:
         dev_cfg = self.config["device"]

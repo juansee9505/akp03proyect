@@ -15,6 +15,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --collect-submodules winrt ^
   --collect-submodules pycaw ^
   --hidden-import pystray._win32 ^
+  --hidden-import websocket ^
   run.py || goto :error
 
 echo.

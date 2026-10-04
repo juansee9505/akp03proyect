@@ -43,6 +43,42 @@ def pretty_app_name(app_id: str) -> str:
     return name[:1].upper() + name[1:]
 
 
+_PROCESS_STEMS = {
+    "308046b0af4a39cb": "firefox",
+    "msedge": "msedge",
+    "chrome": "chrome",
+    "firefox": "firefox",
+    "spotify": "spotify",
+    "brave": "brave",
+    "opera": "opera",
+    "vivaldi": "vivaldi",
+    "vlc": "vlc",
+}
+
+
+def process_stems(app_id: str) -> set[str]:
+    """Posibles nombres de proceso (sin .exe) para un identificador de app.
+
+    'Spotify.exe' -> {'spotify'}, 'SpotifyAB.SpotifyMusic_x!Spotify' -> {'spotify'},
+    'MSEdge' -> {'msedge'}, '308046B0AF4A39CB' -> {'firefox'}.
+    """
+    if not app_id:
+        return set()
+    stems = set()
+    aid = app_id.lower()
+    last = aid.split("!")[-1].rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    if last.endswith(".exe"):
+        last = last[:-4]
+    stems.add(last)
+    for key, stem in _PROCESS_STEMS.items():
+        if key in aid:
+            stems.add(stem)
+    first = aid.split(".")[0].split("_")[0]
+    if first and "!" not in first:
+        stems.add(first)
+    return {s for s in stems if s}
+
+
 @dataclass
 class MediaState:
     title: str = ""
@@ -55,8 +91,11 @@ class MediaState:
     sampled_at: float = field(default_factory=time.monotonic)
     art: Optional[bytes] = None  # imagen (PNG/JPEG) de la carátula
     art_key: str = ""
-    volume: Optional[int] = None  # 0-100
+    volume: Optional[int] = None  # volumen general del PC, 0-100
     muted: bool = False
+    app_volume: Optional[int] = None  # volumen de la app que suena (Spotify, Chrome…)
+    app_muted: bool = False
+    mic_muted: Optional[bool] = None  # micrófono predeterminado
 
     @property
     def playing(self) -> bool:
@@ -117,6 +156,18 @@ class MediaBackend:
 
     def toggle_mute(self) -> None:
         pass
+
+    # Volumen sólo de la aplicación que está sonando.
+    def set_app_volume(self, percent: int) -> bool:
+        """Devuelve False si no se encontró la aplicación en el mezclador."""
+        return False
+
+    def toggle_app_mute(self) -> bool:
+        return False
+
+    def toggle_mic_mute(self) -> Optional[bool]:
+        """Silencia/activa el micrófono. Devuelve el nuevo estado (True = silenciado)."""
+        return None
 
     def close(self) -> None:
         pass

@@ -58,6 +58,35 @@ def _draw(name: str, d: ImageDraw.ImageDraw, s: float, fill) -> None:
         _rect(d, 0.36, 0.22, 0.42, 0.70, s, fill)
         _rect(d, 0.76, 0.14, 0.82, 0.62, s, fill)
         _poly(d, [(0.36, 0.22), (0.82, 0.12), (0.82, 0.24), (0.36, 0.34)], s, fill)
+    elif name in ("mic", "mic_off"):
+        w = max(1, int(0.07 * s))
+        _rect(d, 0.38, 0.10, 0.62, 0.56, s, fill, 0.12)
+        d.arc((0.26 * s, 0.26 * s, 0.74 * s, 0.70 * s), 0, 180, fill=fill, width=w)
+        _rect(d, 0.465, 0.68, 0.535, 0.84, s, fill)
+        _rect(d, 0.34, 0.82, 0.66, 0.89, s, fill, 0.03)
+        if name == "mic_off":
+            d.line((0.16 * s, 0.12 * s, 0.84 * s, 0.90 * s), fill=fill, width=int(w * 1.2))
+    elif name == "record":
+        d.ellipse((0.22 * s, 0.22 * s, 0.78 * s, 0.78 * s), fill=fill)
+    elif name == "stream":
+        w = max(1, int(0.07 * s))
+        d.ellipse((0.41 * s, 0.41 * s, 0.59 * s, 0.59 * s), fill=fill)
+        for r in (0.20, 0.34):
+            box = ((0.5 - r) * s, (0.5 - r) * s, (0.5 + r) * s, (0.5 + r) * s)
+            d.arc(box, -45, 45, fill=fill, width=w)
+            d.arc(box, 135, 225, fill=fill, width=w)
+    elif name == "scene":
+        w = max(1, int(0.07 * s))
+        d.rounded_rectangle((0.12 * s, 0.20 * s, 0.88 * s, 0.68 * s), radius=0.05 * s, outline=fill, width=w)
+        _rect(d, 0.46, 0.68, 0.54, 0.80, s, fill)
+        _rect(d, 0.30, 0.78, 0.70, 0.85, s, fill, 0.03)
+    elif name == "camera":
+        _rect(d, 0.12, 0.30, 0.66, 0.70, s, fill, 0.06)
+        _poly(d, [(0.66, 0.50), (0.88, 0.32), (0.88, 0.68)], s, fill)
+    elif name == "replay":
+        w = max(1, int(0.08 * s))
+        d.arc((0.18 * s, 0.18 * s, 0.82 * s, 0.82 * s), -60, 240, fill=fill, width=w)
+        _poly(d, [(0.08, 0.30), (0.34, 0.26), (0.20, 0.50)], s, fill)
     elif name == "plus":
         _rect(d, 0.44, 0.20, 0.56, 0.80, s, fill, 0.03)
         _rect(d, 0.20, 0.44, 0.80, 0.56, s, fill, 0.03)
@@ -78,4 +107,5 @@ ICON_FOR_TYPE = {
     "volume_up": "volume_up",
     "volume_down": "volume_down",
     "mute": "mute",
+    "mic": "mic",
 }

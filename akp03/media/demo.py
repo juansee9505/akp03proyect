@@ -39,6 +39,9 @@ class DemoBackend(MediaBackend):
         self._t = time.monotonic()
         self._volume = 40
         self._muted = False
+        self._app_volume = 80
+        self._app_muted = False
+        self._mic_muted = False
         self._arts = [_make_art(item[5]) for item in _PLAYLIST]
 
     def _advance(self):
@@ -60,6 +63,8 @@ class DemoBackend(MediaBackend):
                 position=self._pos, duration=float(dur), sampled_at=self._t,
                 art=self._arts[self._index], art_key=f"demo{self._index}",
                 volume=self._volume, muted=self._muted,
+                app_volume=self._app_volume, app_muted=self._app_muted,
+                mic_muted=self._mic_muted,
             )
 
     def play_pause(self):
@@ -92,3 +97,15 @@ class DemoBackend(MediaBackend):
 
     def toggle_mute(self):
         self._muted = not self._muted
+
+    def set_app_volume(self, percent):
+        self._app_volume = max(0, min(100, int(percent)))
+        return True
+
+    def toggle_app_mute(self):
+        self._app_muted = not self._app_muted
+        return True
+
+    def toggle_mic_mute(self):
+        self._mic_muted = not self._mic_muted
+        return self._mic_muted
