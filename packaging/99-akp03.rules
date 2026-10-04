@@ -1,0 +1,6 @@
+# Permite usar el Ajazz AKP03 sin root en Linux.
+# Copiar a /etc/udev/rules.d/ y ejecutar: sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0300", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0300", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="6603", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="6603", MODE="0666"

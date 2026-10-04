@@ -1,0 +1,12 @@
+pillow>=10.1
+hidapi>=0.14
+
+# Windows: información de lo que suena (Spotify, YouTube, etc.), volumen y bandeja
+winrt-runtime>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=2.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
+pycaw>=20230407; sys_platform == "win32"
+comtypes; sys_platform == "win32"
+pystray>=0.19; sys_platform == "win32"
