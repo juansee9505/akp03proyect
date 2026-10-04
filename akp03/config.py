@@ -88,7 +88,7 @@ _V1_BUTTONS = [
     {"action": "next", "target": None},
 ]
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
@@ -149,7 +149,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "media": {
         "backend": "auto",
-        "poll_interval": 0.5,
+        # Segundos entre consultas de «qué suena». El progreso se interpola entre
+        # consultas y los botones refrescan al instante, así que 1 s basta.
+        "poll_interval": 1.0,
         "prefer_playing": True,
     },
     "app": {
@@ -218,6 +220,10 @@ def _migrate(data: dict) -> dict:
                 dev["key_size"] = 0
             if dev.get("rotation") == 0:
                 dev["rotation"] = None
+    if int(data.get("version", 1) or 1) < 4:
+        media = data.get("media")
+        if isinstance(media, dict) and media.get("poll_interval") == 0.5:
+            media["poll_interval"] = 1.0
     data["version"] = CONFIG_VERSION
     return data
 

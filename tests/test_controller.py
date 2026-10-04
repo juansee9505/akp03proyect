@@ -147,7 +147,7 @@ def test_no_device_found_keeps_rendering(tmp_path):
                       config_path=tmp_path / "c.json")
     ctrl.start()
     try:
-        assert wait_for(lambda: ctrl.frame_id > 3)
+        assert wait_for(lambda: ctrl.frame_id >= 1)
         assert "No se encontró" in ctrl.status
         assert len(ctrl.last_frame) == 6
     finally:

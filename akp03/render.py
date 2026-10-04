@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -62,6 +63,22 @@ def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
 
 def text_width(draw: ImageDraw.ImageDraw, text: str, fnt) -> float:
     return draw.textlength(text, font=fnt)
+
+
+@lru_cache(maxsize=256)
+def text_strip(text: str, fnt, fill: tuple, gap: int = 0) -> Image.Image:
+    """Texto rasterizado una vez (RGBA). Con gap > 0 contiene «texto + hueco + texto»
+    para el desplazamiento continuo."""
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    tw = int(round(text_width(probe, text, fnt)))
+    height = int(fnt.size * 1.4) if hasattr(fnt, "size") else 16
+    width = max(1, tw * 2 + gap if gap else tw)
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    d.text((0, 0), text, font=fnt, fill=fill)
+    if gap:
+        d.text((tw + gap, 0), text, font=fnt, fill=fill)
+    return layer
 
 
 def fmt_time(seconds: Optional[float]) -> str:
@@ -141,6 +158,8 @@ class AnimatedImage:
     """Imagen estática o animada (GIF/WebP/APNG) cargada en memoria."""
 
     MAX_FRAMES = 300
+    MAX_SIDE = 256  # las teclas miden 60-64 px: no hace falta guardar más resolución
+    MAX_BYTES = 24 * 1024 * 1024  # memoria máxima por animación
 
     def __init__(self, frames: list[Image.Image], durations: list[float]):
         self.frames = frames
@@ -154,11 +173,26 @@ class AnimatedImage:
 
     @classmethod
     def from_image(cls, img: Image.Image) -> "AnimatedImage":
+        """Carga una imagen reduciéndola y, si es una animación muy larga, saltando
+        cuadros (sumando su duración) para no pasar de MAX_BYTES."""
+        scale = min(1.0, cls.MAX_SIDE / max(img.size))
+        size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+        total = getattr(img, "n_frames", 1)
+        budget = max(1, cls.MAX_BYTES // (size[0] * size[1] * 4))
+        step = max(1, -(-min(total, cls.MAX_FRAMES * 4) // min(budget, cls.MAX_FRAMES)))
         frames, durations = [], []
-        for frame in ImageSequence.Iterator(img):
-            frames.append(frame.convert("RGBA"))
-            durations.append(max(0.02, (frame.info.get("duration") or img.info.get("duration") or 100) / 1000))
-            if len(frames) >= cls.MAX_FRAMES:
+        for i, frame in enumerate(ImageSequence.Iterator(img)):
+            dur = max(0.02, (frame.info.get("duration") or img.info.get("duration") or 100) / 1000)
+            if i % step:
+                if durations:
+                    durations[-1] += dur
+                continue
+            f = frame.convert("RGBA")
+            if f.size != size:
+                f = f.resize(size, Image.LANCZOS)
+            frames.append(f)
+            durations.append(dur)
+            if len(frames) >= min(budget, cls.MAX_FRAMES):
                 break
         return cls(frames, durations)
 
@@ -187,26 +221,53 @@ class AnimatedImage:
 
 
 _media_cache: dict[str, tuple[float, Optional[AnimatedImage]]] = {}
+_media_checked: dict[str, float] = {}
+_media_loading: set[str] = set()
+_media_lock = threading.Lock()
+MEDIA_RECHECK_SECONDS = 2.0  # cada cuánto se mira si el archivo cambió
 
 
-def load_media(path: Optional[str]) -> Optional[AnimatedImage]:
-    if not path:
-        return None
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        return None
-    cached = _media_cache.get(path)
-    if cached and cached[0] == mtime:
-        return cached[1]
+def _load_media_now(path: str, mtime: float) -> None:
     try:
         with Image.open(path) as img:
-            media = AnimatedImage.from_image(img)
+            media: Optional[AnimatedImage] = AnimatedImage.from_image(img)
     except Exception as exc:  # noqa: BLE001
         log.warning("No se pudo cargar la imagen %s: %s", path, exc)
         media = None
-    _media_cache[path] = (mtime, media)
-    return media
+    with _media_lock:
+        _media_cache[path] = (mtime, media)
+        _media_loading.discard(path)
+
+
+def load_media(path: Optional[str], wait: bool = False) -> Optional[AnimatedImage]:
+    """Imagen/GIF propio. La primera carga se hace en segundo plano (un GIF grande
+    tarda segundos en decodificarse y no debe congelar las teclas); mientras tanto
+    devuelve la versión anterior o None. ``wait=True`` carga en el momento."""
+    if not path:
+        return None
+    now = time.monotonic()
+    with _media_lock:
+        cached = _media_cache.get(path)
+        if cached and now - _media_checked.get(path, 0) < MEDIA_RECHECK_SECONDS:
+            return cached[1]
+        _media_checked[path] = now
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        with _media_lock:
+            _media_cache.pop(path, None)
+        return None
+    if cached and cached[0] == mtime:
+        return cached[1]
+    if wait:
+        _load_media_now(path, mtime)
+        return _media_cache[path][1]
+    with _media_lock:
+        if path not in _media_loading:
+            _media_loading.add(path)
+            threading.Thread(target=_load_media_now, args=(path, mtime),
+                             name="akp03-load-media", daemon=True).start()
+    return cached[1] if cached else None
 
 
 # --------------------------------------------------------------------- renderer
@@ -224,6 +285,7 @@ class Renderer:
 
     def update_config(self, config: dict) -> None:
         self.config = config
+        self._cache: dict = {}
         self.size = int(config["device"]["key_size"] or 0) or self._auto_size
         disp = config["display"]
         self.theme = hex_color(disp["theme_color"])
@@ -255,9 +317,33 @@ class Renderer:
             return self._art_image(state)
         return self._art
 
-    def _custom(self, key_cfg: dict, now: float, size: tuple[int, int]) -> Optional[Image.Image]:
+    def _custom(self, key_cfg: dict, now: float, size: tuple[int, int],
+                darken: Optional[float] = None) -> Optional[Image.Image]:
+        """Cuadro actual de la imagen/GIF propia (opcionalmente oscurecido, cacheado)."""
         media = load_media(key_cfg.get("image"))
-        return media.frame(now, size) if media else None
+        if media is None:
+            return None
+        if darken is None:
+            return media.frame(now, size)
+        ck = ("dark", key_cfg.get("image"), media.frame_index(now), size, darken)
+        img = self._cache_get(ck)
+        if img is None:
+            img = self._cache_put(ck, self._darken(media.frame(now, size), darken))
+        return img.copy()
+
+    def _custom_sig(self, key_cfg: dict, now: float):
+        media = load_media(key_cfg.get("image"))
+        return None if media is None else (key_cfg.get("image"), media.frame_index(now))
+
+    # Caché de teclas ya dibujadas (se vacía al cambiar la configuración).
+    def _cache_get(self, sig):
+        return self._cache.get(sig)
+
+    def _cache_put(self, sig, img: Image.Image) -> Image.Image:
+        if len(self._cache) > 200:
+            self._cache.clear()
+        self._cache[sig] = img
+        return img
 
     @staticmethod
     def _darken(img: Image.Image, factor: float) -> Image.Image:
@@ -271,26 +357,33 @@ class Renderer:
         cx, cy = center or (img.width // 2, img.height // 2)
         img.alpha_composite(ic, (cx - s // 2, cy - s // 2))
 
+    @staticmethod
+    def _text(img: Image.Image, x: int, y: int, text: str, fnt, fill, right: bool = False) -> None:
+        """Dibuja texto usando la tira cacheada (``right`` = alineado a la derecha en x)."""
+        if not text:
+            return
+        strip = text_strip(text, fnt, tuple(fill))
+        if right:
+            x -= strip.width
+        img.alpha_composite(strip, (max(0, x), y), (max(0, -x), 0))
+
     def _marquee(self, img: Image.Image, text: str, fnt, x: int, y: int, width: int,
                  t: float, fill) -> None:
         if not text or width <= 0:
             return
-        d = ImageDraw.Draw(img)
-        tw = text_width(d, text, fnt)
-        if tw <= width:
-            d.text((x, y), text, font=fnt, fill=fill)
+        single = text_strip(text, fnt, tuple(fill))
+        if single.width <= width:
+            img.alpha_composite(single, (x, y))
             return
         gap = max(20, self.size // 2)
+        tw = single.width
         pause = 1.5
         cycle = pause + (tw + gap) / max(1.0, self.scroll_speed)
         phase = t % cycle
-        offset = 0.0 if phase < pause else (phase - pause) * self.scroll_speed
-        height = int(fnt.size * 1.4) if hasattr(fnt, "size") else 16
-        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        ld = ImageDraw.Draw(layer)
-        ld.text((-offset, 0), text, font=fnt, fill=fill)
-        ld.text((-offset + tw + gap, 0), text, font=fnt, fill=fill)
-        img.alpha_composite(layer, (x, y))
+        offset = 0 if phase < pause else int((phase - pause) * self.scroll_speed) % (tw + gap)
+        strip = text_strip(text, fnt, tuple(fill), gap)
+        window = strip.crop((offset, 0, offset + width, strip.height))
+        img.alpha_composite(window, (x, y))
 
     @staticmethod
     def _translucent_rect(img: Image.Image, box, radius: float, fill) -> None:
@@ -327,9 +420,9 @@ class Renderer:
 
     def _panel_background(self, key: dict, state: MediaState, now: float, w: int) -> Image.Image:
         s = self.size
-        custom = self._custom(key, now, (w, s))
+        custom = self._custom(key, now, (w, s), darken=0.55)
         if custom is not None:
-            return self._darken(custom, 0.55)
+            return custom
         art = self._art_image(state)
         if art is not None:
             blur = self._art_blur.get((w, s))
@@ -401,13 +494,13 @@ class Renderer:
         app = state.app
         if status and not _font_has(small, status.strip()):
             status = ""
-        d.text((pad, y_info), f"{status}{app}", font=small, fill=GREY)
+        self._text(img, pad, y_info, f"{status}{app}", small, GREY)
         pos = state.position_at(now)
         if pos is not None and state.duration:
             label = fmt_time(pos)
             if w >= s * 2:
                 label += " / " + fmt_time(state.duration)
-            d.text((w - pad, y_info), label, font=small, fill=GREY, anchor="ra")
+            self._text(img, w - pad, y_info, label, small, GREY, right=True)
             bar_y = int(s * 0.88)
             self._bar(img, pad, bar_y, w - pad, bar_y + max(2, s // 20),
                       pos / state.duration, self.theme + (255,))
@@ -416,10 +509,10 @@ class Renderer:
     def _render_button(self, key: dict, state: MediaState, now: float) -> Image.Image:
         s = self.size
         ktype = key["type"]
-        custom = self._custom(key, now, (s, s))
         overlay = key.get("overlay", True)
+        custom = self._custom(key, now, (s, s), darken=0.65 if overlay else None)
         if custom is not None:
-            img = self._darken(custom, 0.65) if overlay else custom.copy()
+            img = custom if overlay else custom.copy()
             if not overlay:
                 return img
         else:
@@ -446,8 +539,8 @@ class Renderer:
 
     def _render_volume(self, key: dict, state: MediaState, now: float) -> Image.Image:
         s = self.size
-        custom = self._custom(key, now, (s, s))
-        img = self._darken(custom, 0.5) if custom is not None else self._blank()
+        custom = self._custom(key, now, (s, s), darken=0.5)
+        img = custom if custom is not None else self._blank()
         d = ImageDraw.Draw(img)
         self._paste_icon(img, "mute" if state.muted else "volume", 0.36,
                          RED if state.muted else WHITE, center=(s // 2, int(s * 0.24)))
@@ -462,8 +555,8 @@ class Renderer:
 
     def _render_clock(self, key: dict, now: float) -> Image.Image:
         s = self.size
-        custom = self._custom(key, now, (s, s))
-        img = self._darken(custom, 0.5) if custom is not None else self._blank()
+        custom = self._custom(key, now, (s, s), darken=0.5)
+        img = custom if custom is not None else self._blank()
         d = ImageDraw.Draw(img)
         lt = time.localtime()
         d.text((s // 2, int(s * 0.42)), time.strftime("%H:%M", lt),
@@ -513,6 +606,11 @@ class Renderer:
             if out[idx] is not None:
                 continue
             ktype = key["type"]
+            sig = self._key_signature(key, state, now, overlay if not has_panel else None)
+            cached = self._cache_get(sig) if sig is not None else None
+            if cached is not None:
+                out[idx] = cached
+                continue
             if ktype == "cover":
                 if overlay is not None and not has_panel:
                     img = self._darken(self._render_cover(key, state, now), 0.35)
@@ -529,8 +627,34 @@ class Renderer:
                 img = self._render_image(key, now)
             else:
                 img = self._blank()
+            if sig is not None:
+                self._cache_put(sig, img)
             out[idx] = img
         return [img.convert("RGB") for img in out]  # type: ignore[union-attr]
+
+    def _key_signature(self, key: dict, state: MediaState, now: float, overlay: Optional[Overlay]):
+        """Todo lo que determina cómo se ve una tecla; si no cambia, se reutiliza la imagen.
+
+        Devuelve None para no cachear (p. ej. la carátula con un aviso encima).
+        """
+        ktype = key["type"]
+        custom = self._custom_sig(key, now)
+        if ktype == "cover":
+            if overlay is not None:
+                return None
+            if state.art:
+                return ("cover", self.size, state.art_key, state.playing, self.dim_paused)
+            return ("cover", self.size, None, custom)
+        if ktype in ("previous", "next", "play_pause", "mute", "mic", "volume_up", "volume_down"):
+            return (ktype, self.size, state.playing, state.muted, state.mic_muted,
+                    custom, key.get("overlay", True))
+        if ktype == "volume":
+            return (ktype, self.size, state.volume, state.muted, custom)
+        if ktype == "clock":
+            return (ktype, self.size, time.strftime("%H:%M %d/%m"), custom)
+        if ktype in ("image", "none"):
+            return (ktype, self.size, custom)
+        return None
 
     def render_identify(self) -> list[Image.Image]:
         """Teclas numeradas 1..6 para comprobar orden y rotación."""

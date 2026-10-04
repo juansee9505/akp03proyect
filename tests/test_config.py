@@ -62,7 +62,7 @@ def test_migration_from_v1_keeps_customized_controls():
                     {"action": "next", "target": None}],
     }
     cfg = normalize(old_defaults)
-    assert cfg["version"] == 3
+    assert cfg["version"] == 4
     assert cfg["knobs"][0]["turn"] == "app_volume"
     assert cfg["knobs"][1]["press"] == "mic_mute"
     assert cfg["buttons"][0]["action"] == "obs_record"

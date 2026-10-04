@@ -5,7 +5,7 @@ from PIL import Image
 from akp03.config import normalize
 from akp03.media.base import MediaState, pretty_app_name
 from akp03.media.demo import DemoBackend
-from akp03.render import AnimatedImage, Overlay, Renderer, encode_key, fmt_time
+from akp03.render import AnimatedImage, Overlay, Renderer, encode_key, fmt_time, load_media
 
 
 def _gif(path, colors):
@@ -62,6 +62,7 @@ def test_overlay_long_text_and_without_panel():
 
 def test_custom_gif_animates(tmp_path):
     path = _gif(tmp_path / "a.gif", [(255, 0, 0), (0, 0, 255)])
+    load_media(path, wait=True)
     cfg = normalize({"keys": [{"type": "image", "image": path}]})
     r = Renderer(cfg)
     f0 = r.render(MediaState(), now=0.05)[0]
@@ -122,3 +123,17 @@ def test_position_interpolation():
     assert st.position_at(101.0) == 11.0
     assert st.position_at(200.0) == 12.0
     assert st.copy(status="paused").position_at(200.0) == 10.0
+
+
+def test_big_gif_loads_in_background_and_is_downscaled(tmp_path):
+    import time
+    path = _gif(tmp_path / "big.gif", [(255, 0, 0), (0, 255, 0), (0, 0, 255)])
+    big = tmp_path / "huge.png"
+    Image.new("RGB", (3000, 2000), (10, 20, 30)).save(big)
+    assert load_media(str(big)) is None  # no bloquea: se carga en segundo plano
+    deadline = time.monotonic() + 5
+    while load_media(str(big)) is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    media = load_media(str(big))
+    assert media is not None and max(media.frames[0].size) == AnimatedImage.MAX_SIDE
+    assert load_media(path, wait=True).animated

@@ -106,6 +106,7 @@ class App:
         self.root.title(f"{APP_NAME} {__version__}")
         self.root.minsize(860, 560)
         self._photos: list[Optional[ImageTk.PhotoImage]] = [None] * NUM_KEYS
+        self._preview_src: list = [None] * NUM_KEYS
         self._last_frame_id = -1
         self._selected = 0
         self._loading = False
@@ -721,11 +722,15 @@ class App:
         self.ctrl.inject(ev)
 
     def _tick(self):
-        try:
-            self._refresh()
-        except Exception:  # noqa: BLE001
-            log.exception("Error actualizando la interfaz")
-        self.root.after(80, self._tick)
+        # Oculta en la bandeja o minimizada: no hay nada que dibujar, se revisa
+        # con poca frecuencia sólo para notar cuándo vuelve a mostrarse.
+        visible = self.root.state() not in ("withdrawn", "iconic")
+        if visible:
+            try:
+                self._refresh()
+            except Exception:  # noqa: BLE001
+                log.exception("Error actualizando la interfaz")
+        self.root.after(100 if visible else 500, self._tick)
 
     def _refresh(self):
         self.status_var.set(self.ctrl.status)
@@ -758,7 +763,10 @@ class App:
             self._last_frame_id = self.ctrl.frame_id
             ks = PREVIEW_SIZE
             for i, img in enumerate(self.ctrl.last_frame[:NUM_KEYS]):
-                photo = ImageTk.PhotoImage(img.resize((ks, ks), Image.LANCZOS))
+                if img is self._preview_src[i]:
+                    continue  # esta tecla no cambió
+                self._preview_src[i] = img
+                photo = ImageTk.PhotoImage(img.resize((ks, ks), Image.BILINEAR))
                 self._photos[i] = photo
                 self.key_labels[i].configure(image=photo, width=ks, height=ks)
 

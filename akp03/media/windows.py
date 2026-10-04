@@ -68,7 +68,14 @@ def _seconds(value: Any) -> Optional[float]:
 
 
 class _Volume:
-    """Volumen con pycaw (Core Audio). Debe usarse desde un único hilo."""
+    """Volumen con pycaw (Core Audio). Debe usarse desde un único hilo.
+
+    Los objetos COM se reutilizan y sólo se vuelven a pedir cada pocos segundos
+    (por si cambió el dispositivo predeterminado) o tras un error.
+    """
+
+    ENDPOINT_TTL = 5.0  # s: altavoz / micrófono predeterminados
+    SESSIONS_TTL = 3.0  # s: lista de apps con sonido
 
     def __init__(self):
         sys.coinit_flags = 0  # COINIT_MULTITHREADED, compatible con WinRT
@@ -78,7 +85,22 @@ class _Volume:
         self._utils = AudioUtilities
         self._iface = IAudioEndpointVolume
         self._clsctx = CLSCTX_ALL
-        self._endpoint(self._utils.GetSpeakers())  # falla aquí si algo no funciona
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._pid_names: dict[int, str] = {}
+        self._master()  # falla aquí si algo no funciona
+
+    def _cached(self, name: str, ttl: float, factory: Callable[[], Any]) -> Any:
+        hit = self._cache.get(name)
+        now = time.monotonic()
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        value = factory()
+        self._cache[name] = (now, value)
+        return value
+
+    def invalidate(self) -> None:
+        """Olvida los objetos cacheados (se llama tras un error)."""
+        self._cache.clear()
 
     def _endpoint(self, device):
         """IAudioEndpointVolume de un dispositivo (pycaw nuevo o antiguo)."""
@@ -91,7 +113,8 @@ class _Volume:
         return iface.QueryInterface(self._iface)
 
     def _master(self):
-        return self._endpoint(self._utils.GetSpeakers())
+        return self._cached("master", self.ENDPOINT_TTL,
+                            lambda: self._endpoint(self._utils.GetSpeakers()))
 
     # ---- volumen general
     def get(self) -> tuple[int, bool]:
@@ -110,16 +133,19 @@ class _Volume:
 
     # ---- micrófono predeterminado
     def _mic(self):
-        try:
-            return self._endpoint(self._utils.GetMicrophone())
-        except Exception:  # noqa: BLE001  (sin micrófono)
-            return None
+        def make():
+            try:
+                return self._endpoint(self._utils.GetMicrophone())
+            except Exception:  # noqa: BLE001  (sin micrófono)
+                return None
+        return self._cached("mic", self.ENDPOINT_TTL, make)
 
     def mic_muted(self) -> Optional[bool]:
         ep = self._mic()
         return None if ep is None else bool(ep.GetMute())
 
     def toggle_mic(self) -> Optional[bool]:
+        self._cache.pop("mic", None)  # asegura el micrófono predeterminado actual
         ep = self._mic()
         if ep is None:
             return None
@@ -128,21 +154,34 @@ class _Volume:
         return new
 
     # ---- volumen por aplicación (mezclador de volumen de Windows)
+    def _process_name(self, pid: int) -> str:
+        name = self._pid_names.get(pid)
+        if name is None:
+            try:
+                import psutil  # type: ignore  (dependencia de pycaw)
+                name = psutil.Process(pid).name().lower()
+            except Exception:  # noqa: BLE001  (proceso terminado / sin permisos)
+                name = ""
+            if len(self._pid_names) > 500:
+                self._pid_names.clear()
+            self._pid_names[pid] = name
+        return name[:-4] if name.endswith(".exe") else name
+
+    def _all_sessions(self) -> list[tuple[str, Any]]:
+        """(nombre de proceso, sesión) de todas las apps con sonido (cacheado)."""
+        def make():
+            out = []
+            for session in self._utils.GetAllSessions():
+                pid = getattr(session, "ProcessId", 0) or 0
+                if pid:
+                    out.append((self._process_name(pid), session))
+            return out
+        return self._cached("sessions", self.SESSIONS_TTL, make)
+
     def _app_sessions(self, stems: set[str]) -> list:
         if not stems:
             return []
-        found = []
-        for session in self._utils.GetAllSessions():
-            try:
-                proc = session.Process
-                name = proc.name().lower() if proc is not None else ""
-            except Exception:  # noqa: BLE001  (proceso terminado / sin permisos)
-                continue
-            if name.endswith(".exe"):
-                name = name[:-4]
-            if name in stems:
-                found.append(session)
-        return found
+        return [session for name, session in self._all_sessions() if name in stems]
 
     def get_app(self, stems: set[str]) -> Optional[tuple[int, bool]]:
         sessions = self._app_sessions(stems)
@@ -223,6 +262,15 @@ class WindowsMediaBackend(MediaBackend):
 
         return asyncio.run_coroutine_threadsafe(runner(), self._loop).result(timeout)
 
+    def _vol(self, fn: Callable[["_Volume"], Any]) -> Any:
+        """Operación de volumen en el hilo de audio; si falla (p. ej. cambió el
+        dispositivo o se cerró la app) se renuevan los objetos y se reintenta."""
+        try:
+            return self._call(lambda: fn(self._volume))
+        except Exception:  # noqa: BLE001
+            self._call(self._volume.invalidate)
+            return self._call(lambda: fn(self._volume))
+
     # ------------------------------------------------------------ estado
     def _pick_session(self):
         sessions = []
@@ -264,12 +312,10 @@ class WindowsMediaBackend(MediaBackend):
         if self._volume is not None:
             try:
                 state.volume, state.muted = self._volume.get()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Error leyendo volumen: %s", exc)
-            try:
                 state.mic_muted = self._volume.mic_muted()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Error leyendo micrófono: %s", exc)
+            except Exception as exc:  # noqa: BLE001  (p. ej. se desconectaron los auriculares)
+                log.debug("Error leyendo volumen: %s", exc)
+                self._volume.invalidate()
 
         session = self._pick_session()
         self._session = session
@@ -287,6 +333,7 @@ class WindowsMediaBackend(MediaBackend):
                     state.app_volume, state.app_muted = app_vol
             except Exception as exc:  # noqa: BLE001
                 log.debug("Error leyendo volumen de %s: %s", app_id, exc)
+                self._volume.invalidate()
         try:
             state.status = _STATUS.get(int(session.get_playback_info().playback_status), "none")
         except Exception:  # noqa: BLE001
@@ -392,14 +439,14 @@ class WindowsMediaBackend(MediaBackend):
         if self._volume is None:
             return None
         try:
-            return self._call(lambda: self._volume.get()[0])
+            return self._vol(lambda v: v.get()[0])
         except Exception:  # noqa: BLE001
             return None
 
     def set_volume(self, percent: int) -> None:
         if self._volume is None:
             return
-        self._call(lambda: self._volume.set(int(percent)))
+        self._vol(lambda v: v.set(int(percent)))
 
     def change_volume(self, delta_percent: int) -> None:
         if self._volume is not None:
@@ -412,22 +459,22 @@ class WindowsMediaBackend(MediaBackend):
         if self._volume is None:
             press_media_key(VK_VOLUME_MUTE)
             return
-        self._call(self._volume.toggle_mute)
+        self._vol(lambda v: v.toggle_mute())
 
     def set_app_volume(self, percent: int) -> bool:
         if self._volume is None:
             return False
-        return bool(self._call(lambda: self._volume.set_app(self._app_stems, int(percent))))
+        return bool(self._vol(lambda v: v.set_app(self._app_stems, int(percent))))
 
     def toggle_app_mute(self) -> bool:
         if self._volume is None:
             return False
-        return bool(self._call(lambda: self._volume.toggle_app_mute(self._app_stems)))
+        return bool(self._vol(lambda v: v.toggle_app_mute(self._app_stems)))
 
     def toggle_mic_mute(self) -> Optional[bool]:
         if self._volume is None:
             return None
-        return self._call(self._volume.toggle_mic)
+        return self._vol(lambda v: v.toggle_mic())
 
     def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)

@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 KEEPALIVE_SECONDS = 10.0
 RECONNECT_SECONDS = 3.0
 TRACK_KNOB_DEBOUNCE = 0.35
+# Si la pantalla no cambia durante este tiempo, se baja a IDLE_INTERVAL entre
+# cuadros (ahorra CPU). Cualquier entrada o cambio de estado lo despierta.
+IDLE_AFTER_SECONDS = 1.0
+IDLE_INTERVAL = 0.5
 
 
 def _parse_id(value) -> Optional[int]:
@@ -86,7 +90,9 @@ class Controller:
         self._coalesce: dict[str, Callable[[], None]] = {}
         self._threads: list[threading.Thread] = []
 
-        self._last_sent: list[Optional[bytes]] = [None] * NUM_KEYS
+        self._last_sent: list[Optional[bytes]] = [None] * NUM_KEYS  # JPEG enviado
+        self._last_raw: list[Optional[bytes]] = [None] * NUM_KEYS  # píxeles del último cuadro
+        self._last_change = 0.0
         self._device_failed = threading.Event()
         self._overlay: Optional[Overlay] = None
         self._overlay_until = 0.0
@@ -135,6 +141,7 @@ class Controller:
             self.config = config
             self.renderer.update_config(config)
             self._last_sent = [None] * NUM_KEYS
+            self._last_raw = [None] * NUM_KEYS
             new_dev = config["device"]
             reconnect = any(old_dev.get(k) != new_dev.get(k) for k in ("vid", "pid", "packet_size"))
         obs_cfg = config["obs"]
@@ -184,6 +191,7 @@ class Controller:
             return
         self._device_failed.clear()
         self._last_sent = [None] * NUM_KEYS
+        self._last_raw = [None] * NUM_KEYS
         with self._lock:
             self.renderer.set_auto_key_size(dev.profile.key_size)
         self.device = dev
@@ -221,23 +229,38 @@ class Controller:
             if ev is not None:
                 self._events.put(ev)
 
-    def _send_frame(self, images) -> None:
+    def _changed_keys(self, images) -> list[int]:
+        """Índices de las teclas cuyo contenido cambió desde el cuadro anterior."""
+        changed = []
+        for i, img in enumerate(images):
+            raw = img.tobytes()
+            if raw != self._last_raw[i]:
+                self._last_raw[i] = raw
+                changed.append(i)
+        return changed
+
+    def _send_frame(self, images, changed: list[int]) -> None:
+        """Comprime y envía sólo las teclas que cambiaron."""
         dev = self.device
         if dev is None:
             return
         dcfg = self.config["device"]
         ids = dcfg["image_key_ids"]
         rotation = dcfg["rotation"] if dcfg["rotation"] is not None else dev.profile.rotation
-        changed = False
-        for i, img in enumerate(images):
-            data = encode_key(img, rotation, dcfg["flip"], dcfg["jpeg_quality"])
+        sent = False
+        for i in changed:
+            data = encode_key(images[i], rotation, dcfg["flip"], dcfg["jpeg_quality"])
             if data == self._last_sent[i]:
                 continue
             dev.set_key_image(int(ids[i]), data)
             self._last_sent[i] = data
-            changed = True
-        if changed:
+            sent = True
+        if sent:
             dev.flush()
+
+    def wake(self) -> None:
+        """Hace que el bucle principal dibuje ya (p. ej. tras un cambio de estado)."""
+        self._events.put(None)  # type: ignore[arg-type]
 
     # ================================================================ bucles
     def _main_loop(self) -> None:
@@ -260,15 +283,24 @@ class Controller:
 
             try:
                 images = self._render(frame_start)
-                self.last_frame = images
-                self.frame_id += 1
             except Exception:  # noqa: BLE001
                 log.exception("Error al renderizar")
                 images = None
+            changed: list[int] = []
+            if images is not None:
+                changed = self._changed_keys(images)
+                if changed:
+                    self._last_change = frame_start
+                    # Las teclas sin cambios conservan su objeto anterior: la vista
+                    # previa de la ventana sólo redibuja las que cambiaron.
+                    prev = self.last_frame
+                    self.last_frame = [images[i] if (i in changed or i >= len(prev)) else prev[i]
+                                       for i in range(len(images))]
+                    self.frame_id += 1
 
             if images is not None and self.device is not None:
                 try:
-                    self._send_frame(images)
+                    self._send_frame(images, changed)
                     if frame_start - last_keepalive > KEEPALIVE_SECONDS:
                         self.device.keep_alive()
                         last_keepalive = frame_start
@@ -277,7 +309,11 @@ class Controller:
                     self._device_failed.set()
 
             # Espera hasta el siguiente cuadro, pero responde al instante a las entradas.
-            deadline = frame_start + 1.0 / self.config["display"]["fps"]
+            # Si la pantalla está quieta, se dibuja con menos frecuencia.
+            interval = 1.0 / self.config["display"]["fps"]
+            if frame_start - self._last_change > IDLE_AFTER_SECONDS:
+                interval = max(interval, IDLE_INTERVAL)
+            deadline = frame_start + interval
             while not self._stop.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -293,6 +329,7 @@ class Controller:
                         self._handle_event(self._events.get_nowait())
                     except queue.Empty:
                         break
+                self._last_change = time.monotonic()  # respuesta fluida tras una entrada
                 break
         self._close_device(blank=True)
 
@@ -328,6 +365,9 @@ class Controller:
                     if now < self._local_status_until and st.track_key == prev.track_key:
                         st = st.copy(status=prev.status)
                     self.state = st
+                if (st.track_key, st.status, st.art_key, st.volume, st.muted, st.mic_muted) != (
+                        prev.track_key, prev.status, prev.art_key, prev.volume, prev.muted, prev.mic_muted):
+                    self.wake()
             self._refresh.wait(float(self.config["media"]["poll_interval"]))
             self._refresh.clear()
 
@@ -360,7 +400,9 @@ class Controller:
             self._actions.put(coalesce_key)
 
     # ================================================================ entradas
-    def _handle_event(self, ev: InputEvent) -> None:
+    def _handle_event(self, ev: Optional[InputEvent]) -> None:
+        if ev is None:  # sólo despertar (ver wake())
+            return
         desc = f"{ev.control}{ev.index + 1} {ev.kind}" + (f" {ev.value:+d}" if ev.kind == "turn" else "")
         self.input_log = (self.input_log + [f"{desc} (código {ev.code:#04x})"])[-20:]
         log.debug("Entrada: %s", desc)
@@ -389,6 +431,7 @@ class Controller:
         self._overlay = overlay
         self._overlay_until = time.monotonic() + (
             seconds if seconds is not None else float(self.config["display"]["volume_overlay_seconds"]))
+        self.wake()
 
     @staticmethod
     def _master_overlay(st: MediaState) -> Overlay:
