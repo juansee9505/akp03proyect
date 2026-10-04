@@ -15,9 +15,17 @@ de Mirabox: cada comando es un paquete de `packet_size` bytes que empieza por
 Las entradas llegan como reportes que empiezan por ``ACK\\0\\0OK\\0\\0`` con el
 código del control en el byte 9 y el estado (1 = pulsado, 0 = soltado) en el 10.
 
-No es un protocolo documentado oficialmente: los valores salen de proyectos de
-código abierto (mirajazz, opendeck-akp03, elgato-streamdeck). Si tu unidad usa
-otros códigos, ejecuta ``akp03 --debug-input`` y ajústalos en la configuración.
+No es un protocolo documentado oficialmente: los valores siguen a los proyectos
+de código abierto mirajazz y opendeck-akp03 (https://github.com/4ndv). Hay dos
+versiones del protocolo en esta familia:
+
+* v2 (AKP03, AKP03E, AKP03R, N3 6602): teclas de 60x60 sin rotar; cada reporte
+  de entrada es una pulsación (el byte de estado no significa nada).
+* v3 (AKP03E/AKP03R rev. 2, N3 6603, Soomfon SE…): teclas de 64x64 giradas 90°
+  y reportes separados de pulsar (1) y soltar (0).
+
+Ambas usan paquetes de 1024 bytes. Si tu unidad usa otros códigos, ejecuta
+``akp03 --debug-input`` y ajústalos en la configuración.
 """
 
 from __future__ import annotations
@@ -32,15 +40,49 @@ log = logging.getLogger(__name__)
 
 CMD_PREFIX = b"CRT\x00\x00"
 
-# (vid, pid, nombre) conocidos.
-KNOWN_DEVICES: list[tuple[int, int, str]] = [
-    (0x0300, 0x1001, "Ajazz AKP03"),
-    (0x0300, 0x1003, "Ajazz AKP03R"),
-    (0x0300, 0x3002, "Ajazz AKP03E"),
-    (0x6603, 0x1002, "Mirabox N3"),
-    (0x6603, 0x1003, "Mirabox N3EN"),
+# (vid, pid, nombre, versión de protocolo) — tomado de opendeck-akp03.
+KNOWN_DEVICES: list[tuple[int, int, str, int]] = [
+    (0x0300, 0x1001, "Ajazz AKP03", 2),
+    (0x0300, 0x1002, "Ajazz AKP03E", 2),
+    (0x0300, 0x1003, "Ajazz AKP03R", 2),
+    (0x0300, 0x3002, "Ajazz AKP03E (rev. 2)", 3),
+    (0x0300, 0x3003, "Ajazz AKP03R (rev. 2)", 3),
+    (0x6602, 0x1000, "Mirabox N3", 2),
+    (0x6602, 0x1002, "Mirabox N3", 2),
+    (0x6603, 0x1002, "Mirabox N3", 3),
+    (0x6603, 0x1003, "Mirabox N3", 3),
+    (0x1500, 0x3001, "Soomfon Stream Controller SE", 3),
+    (0x0B00, 0x1001, "Mars Gaming MSD-TWO", 2),
+    (0x5548, 0x1001, "TreasLin N3", 3),
+    (0x0200, 0x2000, "Redragon Skyrider SS-551", 3),
 ]
 AJAZZ_VENDOR_IDS = {0x0300}
+VENDOR_USAGE_PAGE = 0xFFA0  # interfaz de datos (usage page 65440)
+
+
+@dataclass(frozen=True)
+class DeviceProfile:
+    name: str
+    protocol: int
+    packet_size: int
+    key_size: int
+    rotation: int  # grados, sentido horario
+
+    @property
+    def reports_release(self) -> bool:
+        """v3 informa pulsar y soltar; v2 sólo envía un reporte por pulsación."""
+        return self.protocol >= 3
+
+
+def device_profile(vid: int | None, pid: int | None) -> DeviceProfile:
+    for kv, kp, name, proto in KNOWN_DEVICES:
+        if kv == vid and kp == pid:
+            break
+    else:
+        name, proto = "AKP03 (modelo desconocido)", 2
+    if proto >= 3:
+        return DeviceProfile(name, proto, 1024, 64, 90)
+    return DeviceProfile(name, proto, 1024, 60, 0)
 NAME_HINTS = ("akp03", "ajazz", "mirabox", "stream dock", "streamdock")
 
 # Código del reporte de entrada -> nombre del control.
@@ -93,8 +135,12 @@ def build_input_map(overrides: dict | None = None) -> dict[int, str]:
     return mapping
 
 
-def parse_report(data: bytes, input_map: dict[int, str] | None = None) -> Optional[InputEvent]:
-    """Convierte un reporte HID crudo en un InputEvent (o None si no aplica)."""
+def parse_report(data: bytes, input_map: dict[int, str] | None = None,
+                 reports_release: bool = True) -> Optional[InputEvent]:
+    """Convierte un reporte HID crudo en un InputEvent (o None si no aplica).
+
+    Con ``reports_release=False`` (protocolo v2) cada reporte es una pulsación.
+    """
     if not data:
         return None
     data = bytes(data)
@@ -104,6 +150,8 @@ def parse_report(data: bytes, input_map: dict[int, str] | None = None) -> Option
     if len(data) < base + 11:
         return None
     code, state = data[base + 9], data[base + 10]
+    if not reports_release:
+        state = 1
     if code == 0:
         return None
     name = (input_map or DEFAULT_INPUT_MAP).get(code)
@@ -143,7 +191,7 @@ def _matches(info: dict, vid: int | None, pid: int | None) -> int:
     v, p = info.get("vendor_id"), info.get("product_id")
     if vid is not None:
         return 100 if v == vid and (pid is None or p == pid) else 0
-    if any(v == kv and p == kp for kv, kp, _ in KNOWN_DEVICES):
+    if any(v == kv and p == kp for kv, kp, _, _ in KNOWN_DEVICES):
         return 90
     if v in AJAZZ_VENDOR_IDS:
         return 60
@@ -162,8 +210,10 @@ def find_candidates(infos: Iterable[dict], vid: int | None = None, pid: int | No
         # La interfaz 0 / usage page de vendor suele ser la de datos.
         if info.get("interface_number") in (0, -1):
             score += 5
-        if (info.get("usage_page") or 0) >= 0xFF00:
-            score += 3
+        if info.get("usage_page") == VENDOR_USAGE_PAGE:
+            score += 4
+        elif (info.get("usage_page") or 0) >= 0xFF00:
+            score += 2
         scored.append((score, info))
     scored.sort(key=lambda t: -t[0])
     return [info for _, info in scored]
@@ -197,18 +247,20 @@ class _HidHandle:
 class AKP03Device:
     """Conexión abierta con el AKP03."""
 
-    def __init__(self, handle: Any, packet_size: int = 512, info: dict | None = None,
+    def __init__(self, handle: Any, packet_size: int = 0, info: dict | None = None,
                  input_map: dict[int, str] | None = None):
+        """packet_size = 0 usa el valor del perfil del modelo."""
         self._hid = handle
-        self.packet_size = int(packet_size)
         self.info = info or {}
+        self.profile = device_profile(self.info.get("vendor_id"), self.info.get("product_id"))
+        self.packet_size = int(packet_size) or self.profile.packet_size
         self.input_map = input_map or dict(DEFAULT_INPUT_MAP)
         self._lock = threading.Lock()
         self._closed = False
 
     # ----------------------------------------------------------- apertura
     @classmethod
-    def open(cls, vid: int | None = None, pid: int | None = None, packet_size: int = 512,
+    def open(cls, vid: int | None = None, pid: int | None = None, packet_size: int = 0,
              input_map: dict[int, str] | None = None) -> "AKP03Device":
         candidates = find_candidates(enumerate_hid(), vid, pid)
         if not candidates:
@@ -221,8 +273,9 @@ class AKP03Device:
                 errors.append(f"{info.get('product_string')}: {exc}")
                 continue
             dev = cls(handle, packet_size, info, input_map)
-            log.info("Conectado a %s (VID %04x PID %04x)", dev.name,
-                     info.get("vendor_id", 0), info.get("product_id", 0))
+            log.info("Conectado a %s (VID %04x PID %04x, protocolo v%d, paquetes de %d)",
+                     dev.name, info.get("vendor_id", 0), info.get("product_id", 0),
+                     dev.profile.protocol, dev.packet_size)
             return dev
         raise DeviceError(
             "Se encontró el AKP03 pero no se pudo abrir (¿está abierto el software "
@@ -231,7 +284,8 @@ class AKP03Device:
 
     @property
     def name(self) -> str:
-        return self.info.get("product_string") or "AKP03"
+        # El nombre USB suele ser «HOTSPOTEKUSB HID DEMO»: mejor el del perfil.
+        return self.profile.name
 
     # ----------------------------------------------------------- escritura
     def _write_packet(self, payload: bytes) -> None:
@@ -279,9 +333,14 @@ class AKP03Device:
 
     def initialize(self, brightness: int) -> None:
         self.wake()
-        self.set_brightness(brightness)
         self.clear()
-        self.flush()
+        self.flush()  # v2/v3 necesitan STP para aplicar el borrado
+        self.set_brightness(brightness)
+
+    def shutdown(self) -> None:
+        """Borra las teclas y devuelve el dispositivo a reposo (como al apagar)."""
+        self._command(b"CLE\x00\x00DC")
+        self._command(b"HAN")
 
     # ----------------------------------------------------------- lectura
     def read_raw(self, timeout_ms: int = 100) -> bytes:
@@ -292,8 +351,11 @@ class AKP03Device:
         except Exception as exc:
             raise DeviceError(f"Error leyendo del dispositivo: {exc}") from exc
 
+    def parse(self, raw: bytes) -> Optional[InputEvent]:
+        return parse_report(raw, self.input_map, self.profile.reports_release)
+
     def read_event(self, timeout_ms: int = 100) -> Optional[InputEvent]:
-        return parse_report(self.read_raw(timeout_ms), self.input_map)
+        return self.parse(self.read_raw(timeout_ms))
 
     # ----------------------------------------------------------- cierre
     def close(self, blank: bool = True) -> None:
@@ -301,8 +363,7 @@ class AKP03Device:
             return
         if blank:
             try:
-                self.clear()
-                self.flush()
+                self.shutdown()
             except DeviceError:
                 pass
         self._closed = True

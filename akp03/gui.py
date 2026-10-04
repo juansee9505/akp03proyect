@@ -70,7 +70,8 @@ KNOB_LABELS = {
     "none": "Nada",
 }
 AUTO_ACTION = "Automática (según el tipo)"
-PREVIEW_SCALE = 1.6
+PREVIEW_SIZE = 96  # píxeles de cada tecla en la vista previa
+AUTO = "Automático"
 IMAGE_TYPES = [("Imágenes y GIF", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"), ("Todos", "*.*")]
 
 
@@ -198,7 +199,7 @@ class App:
         pv = ttk.LabelFrame(left, text="Vista previa del AKP03 (clic = editar, clic derecho = pulsar)",
                             padding=8)
         pv.pack(fill="x")
-        ks = int(self.cfg["device"]["key_size"] * PREVIEW_SCALE)
+        ks = PREVIEW_SIZE
         grid = tk.Frame(pv, bg="#222", padx=6, pady=6)
         grid.pack()
         self.key_labels: list[tk.Label] = []
@@ -602,13 +603,13 @@ class App:
         ttk.Entry(f, textvariable=self.pid_var, width=10).grid(row=1, column=1, sticky="w", pady=3)
 
         ttk.Label(f, text="Tamaño de paquete").grid(row=2, column=0, sticky="w")
-        self.packet_var = tk.StringVar(value=str(dev["packet_size"]))
-        ttk.Combobox(f, textvariable=self.packet_var, values=["512", "1024"], width=8,
+        self.packet_var = tk.StringVar(value=str(dev["packet_size"]) if dev["packet_size"] else AUTO)
+        ttk.Combobox(f, textvariable=self.packet_var, values=[AUTO, "512", "1024"], width=12,
                      state="readonly").grid(row=2, column=1, sticky="w", pady=3)
 
         ttk.Label(f, text="Rotación de imagen").grid(row=3, column=0, sticky="w")
-        self.rot_var = tk.StringVar(value=str(dev["rotation"]))
-        ttk.Combobox(f, textvariable=self.rot_var, values=["0", "90", "180", "270"], width=8,
+        self.rot_var = tk.StringVar(value=AUTO if dev["rotation"] is None else str(dev["rotation"]))
+        ttk.Combobox(f, textvariable=self.rot_var, values=[AUTO, "0", "90", "180", "270"], width=12,
                      state="readonly").grid(row=3, column=1, sticky="w", pady=3)
 
         self.flip_var = tk.BooleanVar(value=dev["flip"])
@@ -631,10 +632,13 @@ class App:
                   foreground="#666", wraplength=440, justify="left").grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(10, 6))
 
-        ttk.Label(f, text="Últimas entradas recibidas:").grid(row=8, column=0, columnspan=2, sticky="w")
+        self.model_var = tk.StringVar()
+        ttk.Label(f, textvariable=self.model_var, foreground="#2a7").grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(f, text="Últimas entradas recibidas:").grid(row=9, column=0, columnspan=2, sticky="w")
         self.input_list = tk.Listbox(f, height=7)
-        self.input_list.grid(row=9, column=0, columnspan=2, sticky="nsew")
-        f.rowconfigure(9, weight=1)
+        self.input_list.grid(row=10, column=0, columnspan=2, sticky="nsew")
+        f.rowconfigure(10, weight=1)
         return f
 
     def _device_changed(self):
@@ -654,8 +658,8 @@ class App:
         def fn(cfg):
             d = cfg["device"]
             d["vid"], d["pid"] = vid, pid
-            d["packet_size"] = int(self.packet_var.get())
-            d["rotation"] = int(self.rot_var.get())
+            d["packet_size"] = 0 if self.packet_var.get() == AUTO else int(self.packet_var.get())
+            d["rotation"] = None if self.rot_var.get() == AUTO else int(self.rot_var.get())
             d["flip"] = bool(self.flip_var.get())
             d["image_key_ids"] = ids
 
@@ -752,11 +756,20 @@ class App:
 
         if self.ctrl.frame_id != self._last_frame_id and self.ctrl.last_frame:
             self._last_frame_id = self.ctrl.frame_id
-            ks = int(self.cfg["device"]["key_size"] * PREVIEW_SCALE)
+            ks = PREVIEW_SIZE
             for i, img in enumerate(self.ctrl.last_frame[:NUM_KEYS]):
                 photo = ImageTk.PhotoImage(img.resize((ks, ks), Image.LANCZOS))
                 self._photos[i] = photo
                 self.key_labels[i].configure(image=photo, width=ks, height=ks)
+
+        dev = self.ctrl.device
+        if dev is not None:
+            p = dev.profile
+            self.model_var.set(f"Modelo detectado: {p.name} · protocolo v{p.protocol} · "
+                               f"teclas {p.key_size}×{p.key_size} · giro {p.rotation}° · "
+                               f"paquetes de {dev.packet_size}")
+        else:
+            self.model_var.set("")
 
         items = self.ctrl.input_log
         if self.input_list.size() != len(items) or (items and self.input_list.get("end") != items[-1]):

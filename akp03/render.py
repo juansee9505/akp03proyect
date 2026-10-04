@@ -211,7 +211,10 @@ def load_media(path: Optional[str]) -> Optional[AnimatedImage]:
 
 # --------------------------------------------------------------------- renderer
 class Renderer:
+    DEFAULT_KEY_SIZE = 60
+
     def __init__(self, config: dict):
+        self._auto_size = self.DEFAULT_KEY_SIZE
         self.update_config(config)
         self._art_key: Optional[str] = None
         self._art: Optional[Image.Image] = None
@@ -221,12 +224,17 @@ class Renderer:
 
     def update_config(self, config: dict) -> None:
         self.config = config
-        self.size = int(config["device"]["key_size"])
+        self.size = int(config["device"]["key_size"] or 0) or self._auto_size
         disp = config["display"]
         self.theme = hex_color(disp["theme_color"])
         self.bg = hex_color(disp["background_color"], (16, 16, 20))
         self.scroll_speed = float(disp["scroll_speed"])
         self.dim_paused = bool(disp.get("dim_cover_when_paused", True))
+
+    def set_auto_key_size(self, size: int) -> None:
+        """Tamaño de tecla del modelo conectado (se usa si la config dice 0)."""
+        self._auto_size = int(size)
+        self.update_config(self.config)
 
     # ------------------------------------------------------------ utilidades
     def _blank(self, w: Optional[int] = None) -> Image.Image:

@@ -13,7 +13,7 @@ import webbrowser
 from typing import Callable, Optional
 
 from .config import DEFAULT_KEY_ACTION, NUM_KEYS, save_config
-from .device import AKP03Device, DeviceError, InputEvent, build_input_map, parse_report
+from .device import AKP03Device, DeviceError, InputEvent, build_input_map
 from .media.base import MediaBackend, MediaState
 from .obs import OBSActions, OBSClient, OBSConnectionLost, OBSError
 from .render import Overlay, Renderer, encode_key
@@ -37,7 +37,7 @@ def open_from_config(cfg: dict) -> AKP03Device:
     dev_cfg = cfg["device"]
     return AKP03Device.open(
         vid=_parse_id(dev_cfg.get("vid")), pid=_parse_id(dev_cfg.get("pid")),
-        packet_size=int(dev_cfg.get("packet_size", 512)),
+        packet_size=int(dev_cfg.get("packet_size") or 0),
         input_map=build_input_map(dev_cfg.get("input_map")),
     )
 
@@ -184,6 +184,8 @@ class Controller:
             return
         self._device_failed.clear()
         self._last_sent = [None] * NUM_KEYS
+        with self._lock:
+            self.renderer.set_auto_key_size(dev.profile.key_size)
         self.device = dev
         self._set_status(f"Conectado: {dev.name}")
         t = threading.Thread(target=self._reader_loop, args=(dev,), name="akp03-reader", daemon=True)
@@ -215,7 +217,7 @@ class Controller:
                 return
             if not raw:
                 continue
-            ev = parse_report(raw, dev.input_map)
+            ev = dev.parse(raw)
             if ev is not None:
                 self._events.put(ev)
 
@@ -225,9 +227,10 @@ class Controller:
             return
         dcfg = self.config["device"]
         ids = dcfg["image_key_ids"]
+        rotation = dcfg["rotation"] if dcfg["rotation"] is not None else dev.profile.rotation
         changed = False
         for i, img in enumerate(images):
-            data = encode_key(img, dcfg["rotation"], dcfg["flip"], dcfg["jpeg_quality"])
+            data = encode_key(img, rotation, dcfg["flip"], dcfg["jpeg_quality"])
             if data == self._last_sent[i]:
                 continue
             dev.set_key_image(int(ids[i]), data)

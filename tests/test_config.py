@@ -62,7 +62,7 @@ def test_migration_from_v1_keeps_customized_controls():
                     {"action": "next", "target": None}],
     }
     cfg = normalize(old_defaults)
-    assert cfg["version"] == 2
+    assert cfg["version"] == 3
     assert cfg["knobs"][0]["turn"] == "app_volume"
     assert cfg["knobs"][1]["press"] == "mic_mute"
     assert cfg["buttons"][0]["action"] == "obs_record"
@@ -72,3 +72,11 @@ def test_migration_from_v1_keeps_customized_controls():
     # Ya en v2: no se toca nada.
     v2 = normalize({"version": 2, "buttons": old_defaults["buttons"]})
     assert v2["buttons"][0]["action"] == "previous"
+
+
+def test_migration_to_auto_device_settings():
+    cfg = normalize({"version": 2, "device": {"packet_size": 512, "key_size": 60, "rotation": 0}})
+    assert (cfg["device"]["packet_size"], cfg["device"]["key_size"], cfg["device"]["rotation"]) == (0, 0, None)
+    # Valores que el usuario cambió a mano se respetan.
+    cfg = normalize({"version": 2, "device": {"packet_size": 1024, "rotation": 180}})
+    assert (cfg["device"]["packet_size"], cfg["device"]["rotation"]) == (1024, 180)

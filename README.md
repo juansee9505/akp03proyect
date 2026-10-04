@@ -104,16 +104,21 @@ La configuración se guarda en `%APPDATA%\AKP03Controller\config.json` (Linux:
 
 ## Si algo no coincide con tu unidad
 
-El protocolo del AKP03 no está documentado oficialmente; los valores provienen de proyectos
-de código abierto (mirajazz, opendeck-akp03). Hay revisiones de hardware distintas, así que
-el programa trae herramientas para ajustarlo:
+El protocolo del AKP03 no está documentado oficialmente; los valores siguen a los proyectos
+de código abierto [mirajazz](https://github.com/4ndv/mirajazz) y
+[opendeck-akp03](https://github.com/4ndv/opendeck-akp03). El programa detecta el modelo por
+su VID/PID y elige solo el tamaño de paquete, de tecla y la rotación (pestaña *Dispositivo* →
+«Modelo detectado»). Modelos conocidos: AKP03, AKP03E y AKP03R (y sus revisiones 2,
+PID 3002/3003), Mirabox N3, Soomfon SE, Mars Gaming MSD-TWO, TreasLin N3, Redragon SS-551.
+
+Si aun así algo no cuadra:
 
 | Problema | Solución |
 |---|---|
 | «No se encontró ningún AKP03» | Pestaña *Dispositivo* → «Ver dispositivos HID», busca tu unidad y escribe su VID/PID. Comprueba que el software oficial está cerrado. |
 | Las imágenes salen en otra tecla | «Identificar teclas» muestra 1-6; ajusta «Orden de teclas (IDs)». |
 | Las imágenes salen giradas/espejadas | Cambia «Rotación» / «Espejar» hasta que la barra de color quede arriba. |
-| No se ven imágenes | Prueba «Tamaño de paquete» = 1024 (firmwares nuevos). |
+| No se ven imágenes | Deja «Tamaño de paquete» en Automático (1024). Si no, prueba 512. |
 | Una tecla/perilla no hace nada | Mira «Últimas entradas recibidas». Si sale «unknown (código 0x..)», añade el código a `device.input_map` en `config.json`, p. ej. `"input_map": {"0x26": "button1"}`. Nombres válidos: `key1`-`key6`, `button1`-`button3`, `knob1+`/`knob1-`/`knob1press` (igual para 2 y 3). |
 
 Desde la línea de comandos:

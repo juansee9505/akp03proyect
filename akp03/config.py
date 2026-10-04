@@ -88,7 +88,7 @@ _V1_BUTTONS = [
     {"action": "next", "target": None},
 ]
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
@@ -96,11 +96,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # null = detección automática
         "vid": None,
         "pid": None,
-        # Tamaño del paquete HID. El AKP03 usa 512; algunos firmwares nuevos 1024.
-        "packet_size": 512,
-        "key_size": 60,
-        # Rotación (grados) y espejo aplicados a la imagen antes de enviarla.
-        "rotation": 0,
+        # 0 / null = automático según el modelo detectado (ver device.KNOWN_DEVICES).
+        "packet_size": 0,
+        "key_size": 0,
+        # Rotación (grados, horario) y espejo aplicados a la imagen antes de enviarla.
+        "rotation": None,
         "flip": False,
         "brightness": 80,
         # Número que el dispositivo usa para cada tecla con pantalla (tecla 1..6).
@@ -207,6 +207,17 @@ def _migrate(data: dict) -> dict:
         buttons = [{"action": b.get("action"), "target": b.get("target")} for b in data.get("buttons", [])]
         if not buttons or buttons == _V1_BUTTONS[:len(buttons)]:
             data.pop("buttons", None)
+    if int(data.get("version", 1) or 1) < 3:
+        # v3: tamaño de paquete, de tecla y rotación automáticos por modelo. Sólo se
+        # conservan valores que el usuario cambió respecto a los antiguos por defecto.
+        dev = data.get("device")
+        if isinstance(dev, dict):
+            if dev.get("packet_size") == 512:
+                dev["packet_size"] = 0
+            if dev.get("key_size") == 60:
+                dev["key_size"] = 0
+            if dev.get("rotation") == 0:
+                dev["rotation"] = None
     data["version"] = CONFIG_VERSION
     return data
 
@@ -229,7 +240,10 @@ def normalize(cfg: dict) -> dict:
             knob["press"] = "none"
     dev = cfg["device"]
     dev["brightness"] = max(0, min(100, int(dev["brightness"])))
-    dev["rotation"] = int(dev["rotation"]) % 360 // 90 * 90
+    if dev["rotation"] is not None:
+        dev["rotation"] = int(dev["rotation"]) % 360 // 90 * 90
+    dev["packet_size"] = int(dev["packet_size"] or 0)
+    dev["key_size"] = int(dev["key_size"] or 0)
     if len(dev["image_key_ids"]) != NUM_KEYS:
         dev["image_key_ids"] = list(DEFAULT_CONFIG["device"]["image_key_ids"])
     cfg["display"]["fps"] = max(1, min(30, int(cfg["display"]["fps"])))

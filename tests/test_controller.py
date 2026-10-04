@@ -240,3 +240,23 @@ def test_obs_error_is_reported_not_raised(tmp_path):
         assert ctrl._overlay.subtitle == "OBS" and ctrl._overlay.alert
     finally:
         ctrl.stop()
+
+
+def test_v3_device_renders_64px_rotated(tmp_path):
+    hid = FakeHid()
+    ctrl = Controller(normalize({}), RecordingBackend(), config_path=tmp_path / "c.json",
+                      device_opener=lambda c: AKP03Device(hid, info={"vendor_id": 0x0300, "product_id": 0x3002}))
+    ctrl.start()
+    try:
+        assert wait_for(lambda: sum(w[6:9] == b"BAT" for w in hid.writes) >= 6)
+        assert ctrl.renderer.size == 64
+        assert all(len(w) == 1025 for w in hid.writes)
+        # Reconstruye el JPEG de la primera tecla y comprueba su tamaño.
+        import io
+        from PIL import Image
+        idx = next(i for i, w in enumerate(hid.writes) if w[6:9] == b"BAT")
+        size = int.from_bytes(hid.writes[idx][9:13], "big")
+        data = b"".join(w[1:] for w in hid.writes[idx + 1: idx + 1 + (size + 1023) // 1024])[:size]
+        assert Image.open(io.BytesIO(data)).size == (64, 64)
+    finally:
+        ctrl.stop()

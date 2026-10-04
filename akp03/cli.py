@@ -33,7 +33,6 @@ def _setup_logging(verbose: bool) -> None:
 def _debug_input(cfg: dict) -> int:
     """Muestra los reportes crudos del dispositivo para mapear controles."""
     from .controller import open_from_config
-    from .device import parse_report
 
     dev = open_from_config(cfg)
     dev.initialize(cfg["device"]["brightness"])
@@ -43,7 +42,7 @@ def _debug_input(cfg: dict) -> int:
             raw = dev.read_raw(500)
             if not raw:
                 continue
-            ev = parse_report(raw, dev.input_map)
+            ev = dev.parse(raw)
             print(raw[:16].hex(" "), "->", ev)
     except KeyboardInterrupt:
         pass

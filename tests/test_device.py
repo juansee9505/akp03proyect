@@ -1,5 +1,5 @@
-from akp03.device import (DEFAULT_INPUT_MAP, InputEvent, build_input_map, find_candidates,
-                          parse_report)
+from akp03.device import (DEFAULT_INPUT_MAP, AKP03Device, InputEvent, build_input_map, device_profile,
+                          find_candidates, parse_report)
 from conftest import make_report
 
 
@@ -33,14 +33,14 @@ def test_set_key_image_sends_header_and_chunks(fake_device, fake_hid):
 def test_initialize_sequence(fake_device, fake_hid):
     fake_device.initialize(70)
     cmds = [w[6:9] for w in fake_hid.writes]
-    assert cmds == [b"DIS", b"LIG", b"CLE", b"STP"]
-    assert fake_hid.writes[2][12] == 0xFF  # borrar todas
+    assert cmds == [b"DIS", b"CLE", b"STP", b"LIG"]
+    assert fake_hid.writes[1][12] == 0xFF  # borrar todas
 
 
 def test_close_blanks_and_closes(fake_device, fake_hid):
     fake_device.close()
     assert fake_hid.closed
-    assert [w[6:9] for w in fake_hid.writes] == [b"CLE", b"STP"]
+    assert [w[6:13] for w in fake_hid.writes] == [b"CLE\x00\x00DC", b"HAN\x00\x00\x00\x00"]
 
 
 def test_parse_keys_and_buttons():
@@ -72,6 +72,33 @@ def test_input_map_overrides():
     assert len(DEFAULT_INPUT_MAP) == 18
 
 
+def test_profiles_from_real_device_list():
+    # El AKP03 del usuario: VID 0300 PID 3002 = AKP03E rev. 2 (protocolo v3).
+    p = device_profile(0x0300, 0x3002)
+    assert (p.protocol, p.packet_size, p.key_size, p.rotation) == (3, 1024, 64, 90)
+    assert p.reports_release
+    p = device_profile(0x0300, 0x1001)
+    assert (p.protocol, p.packet_size, p.key_size, p.rotation) == (2, 1024, 60, 0)
+    assert not p.reports_release
+    assert device_profile(0x1234, 0x5678).protocol == 2
+
+
+def test_device_uses_profile_packet_size_and_name(fake_hid):
+    dev = AKP03Device(fake_hid, info={"vendor_id": 0x0300, "product_id": 0x3002,
+                                      "product_string": "HOTSPOTEKUSB HID DEMO"})
+    assert dev.packet_size == 1024 and dev.name == "Ajazz AKP03E (rev. 2)"
+    dev.set_brightness(10)
+    assert len(fake_hid.writes[-1]) == 1025
+    assert AKP03Device(fake_hid, packet_size=512, info={"vendor_id": 0x0300, "product_id": 0x3002}).packet_size == 512
+
+
+def test_v2_every_report_is_a_press():
+    # En v2 el byte de estado no significa nada: cada reporte es una pulsación.
+    assert parse_report(make_report(0x02, 0), reports_release=False).kind == "press"
+    assert parse_report(make_report(0x33, 0), reports_release=False).kind == "press"
+    assert parse_report(make_report(0x02, 0), reports_release=True).kind == "release"
+
+
 def test_find_candidates_prefers_known_ids():
     infos = [
         {"vendor_id": 0x046D, "product_id": 0xC52B, "product_string": "Mouse", "path": b"m"},
@@ -82,3 +109,14 @@ def test_find_candidates_prefers_known_ids():
     assert [i["path"] for i in found] == [b"a0", b"a1"]
     assert find_candidates(infos, vid=0x046D)[0]["path"] == b"m"
     assert find_candidates(infos, vid=0x1234) == []
+
+
+def test_find_candidates_real_akp03e_listing():
+    """Lista HID real del usuario: se elige la interfaz 0 con usage page 0xffa0."""
+    infos = [
+        {"vendor_id": 0x048D, "product_id": 0x5702, "interface_number": 0, "usage_page": 0xFF89, "path": b"ite"},
+        {"vendor_id": 0x03F0, "product_id": 0x0B8F, "interface_number": 1, "usage_page": 0xFFA0, "path": b"hyperx"},
+        {"vendor_id": 0x0300, "product_id": 0x3002, "interface_number": 1, "usage_page": 0x0001, "path": b"akp-if1"},
+        {"vendor_id": 0x0300, "product_id": 0x3002, "interface_number": 0, "usage_page": 0xFFA0, "path": b"akp-if0"},
+    ]
+    assert [i["path"] for i in find_candidates(infos)] == [b"akp-if0", b"akp-if1"]
