@@ -42,6 +42,18 @@ Notas:
 - «Silenciar micrófono» silencia el micrófono predeterminado de Windows, así que afecta a
   todas las apps (OBS, Discord, etc.).
 
+## Apagar el PC
+
+Al **apagar, reiniciar, cerrar sesión, suspender o hibernar** Windows, el programa apaga la
+pantalla del AKP03 antes de cerrarse; al despertar la vuelve a encender. Opcionalmente
+(pestaña *General*, activado por defecto) también la apaga cuando Windows apaga el monitor
+por inactividad; se enciende al tocar el AKP03 o al volver a usar el PC.
+
+Muchas placas base siguen dando corriente a los USB con el PC apagado (para cargar el
+móvil, etc.). Eso no daña nada: el programa deja el AKP03 en reposo con la pantalla
+apagada. Si además quieres cortar la corriente del todo, busca en la BIOS/UEFI la opción
+**ErP**, **ErP Ready** o **USB power in S4/S5** y actívala/desactívala según el fabricante.
+
 ## OBS
 
 1. En OBS (28 o superior): **Herramientas → Ajustes del servidor WebSocket** → marca
@@ -157,6 +169,7 @@ sudo udevadm control --reload && sudo udevadm trigger
 | `akp03/media/linux.py` | Lo mismo en Linux (playerctl / wpctl) |
 | `akp03/render.py`, `akp03/icons.py` | Dibujo de cada tecla, texto desplazable, GIF animados |
 | `akp03/obs.py` | Cliente de obs-websocket v5 y acciones de OBS |
+| `akp03/power.py` | Avisos de Windows: apagar, suspender, monitor apagado |
 | `akp03/controller.py` | Une todo: entradas → acciones, estado → imágenes, reconexión automática |
 | `akp03/gui.py` | Ventana de configuración y vista previa |
 | `packaging/` | Compilación del .exe e instalador |

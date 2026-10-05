@@ -8,7 +8,6 @@ import logging.handlers
 import signal
 import sys
 import threading
-import time
 from pathlib import Path
 
 from . import APP_NAME, __version__
@@ -92,6 +91,14 @@ def main(argv: list[str] | None = None) -> int:
     log.info("%s %s - backend de medios: %s", APP_NAME, __version__, backend.name)
     ctrl = Controller(cfg, backend, config_path=config_path, use_device=not args.no_device)
     ctrl.start()
+
+    from .power import PowerEvents, PowerMonitor
+
+    power = PowerMonitor(PowerEvents(
+        on_shutdown=ctrl.power_shutdown, on_suspend=ctrl.power_suspend,
+        on_resume=ctrl.power_resume, on_display=ctrl.display_changed,
+        display_enabled=lambda: bool(ctrl.config["app"]["screen_off_with_monitor"])))
+    power.start()
     if args.identify:
         ctrl.identify()
 
@@ -109,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(line, flush=True)
                 last = line
             stop.wait(1.0)
+        power.stop()
         ctrl.stop()
         return 0
 
@@ -116,12 +124,14 @@ def main(argv: list[str] | None = None) -> int:
         from .gui import App
     except ImportError as exc:
         log.error("No se pudo cargar la interfaz gráfica (%s). Usa --headless.", exc)
+        power.stop()
         ctrl.stop()
         return 1
     app = App(ctrl, start_minimized=args.minimized or cfg["app"]["start_minimized"])
     try:
         app.run()
     finally:
+        power.stop()
         ctrl.stop()
     return 0
 

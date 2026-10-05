@@ -696,6 +696,12 @@ class App:
         self.tray_var = tk.BooleanVar(value=app["minimize_to_tray"])
         ttk.Checkbutton(f, text="Al cerrar la ventana, seguir funcionando en la bandeja del sistema",
                         variable=self.tray_var, command=self._general_changed).pack(anchor="w", pady=3)
+        self.monitor_var = tk.BooleanVar(value=app["screen_off_with_monitor"])
+        ttk.Checkbutton(f, text="Apagar las teclas cuando Windows apaga el monitor (se encienden al "
+                                "tocar el AKP03 o al volver a usar el PC)",
+                        variable=self.monitor_var, command=self._general_changed).pack(anchor="w", pady=3)
+        ttk.Label(f, text=("Al apagar, reiniciar o suspender el PC las teclas se apagan siempre."),
+                  foreground="#666").pack(anchor="w", pady=(0, 3))
         ttk.Label(f, text=(
             "Importante: cierra el software oficial de Ajazz / Stream Dock, porque sólo un "
             "programa a la vez puede controlar el dispositivo.\n\n"
@@ -714,6 +720,7 @@ class App:
         def fn(cfg):
             cfg["app"]["start_minimized"] = bool(self.min_var.get())
             cfg["app"]["minimize_to_tray"] = bool(self.tray_var.get())
+            cfg["app"]["screen_off_with_monitor"] = bool(self.monitor_var.get())
 
         self._update(fn)
 

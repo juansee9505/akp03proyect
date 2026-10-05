@@ -93,6 +93,11 @@ class Controller:
         self._last_sent: list[Optional[bytes]] = [None] * NUM_KEYS  # JPEG enviado
         self._last_raw: list[Optional[bytes]] = [None] * NUM_KEYS  # píxeles del último cuadro
         self._last_change = 0.0
+        # Pantalla del AKP03 apagada (PC apagándose, suspendido o monitor apagado).
+        # _io_lock serializa el envío de cuadros con el apagado/encendido.
+        self._io_lock = threading.RLock()
+        self._screen_off = False
+        self._shutting_down = False
         self._device_failed = threading.Event()
         self._overlay: Optional[Overlay] = None
         self._overlay_until = 0.0
@@ -196,6 +201,8 @@ class Controller:
             self.renderer.set_auto_key_size(dev.profile.key_size)
         self.device = dev
         self._set_status(f"Conectado: {dev.name}")
+        if self._screen_off:
+            self._safe_device(lambda d: d.shutdown())
         t = threading.Thread(target=self._reader_loop, args=(dev,), name="akp03-reader", daemon=True)
         t.start()
 
@@ -241,6 +248,11 @@ class Controller:
 
     def _send_frame(self, images, changed: list[int]) -> None:
         """Comprime y envía sólo las teclas que cambiaron."""
+        with self._io_lock:
+            if not self._screen_off:
+                self._send_frame_locked(images, changed)
+
+    def _send_frame_locked(self, images, changed: list[int]) -> None:
         dev = self.device
         if dev is None:
             return
@@ -282,7 +294,7 @@ class Controller:
                 self._save()
 
             try:
-                images = self._render(frame_start)
+                images = None if self._screen_off else self._render(frame_start)
             except Exception:  # noqa: BLE001
                 log.exception("Error al renderizar")
                 images = None
@@ -301,7 +313,7 @@ class Controller:
             if images is not None and self.device is not None:
                 try:
                     self._send_frame(images, changed)
-                    if frame_start - last_keepalive > KEEPALIVE_SECONDS:
+                    if frame_start - last_keepalive > KEEPALIVE_SECONDS and not self._screen_off:
                         self.device.keep_alive()
                         last_keepalive = frame_start
                 except DeviceError as exc:
@@ -403,6 +415,9 @@ class Controller:
     def _handle_event(self, ev: Optional[InputEvent]) -> None:
         if ev is None:  # sólo despertar (ver wake())
             return
+        if self._screen_off and not self._shutting_down:
+            # Tocar el AKP03 con la pantalla apagada la enciende.
+            self.screen_on()
         desc = f"{ev.control}{ev.index + 1} {ev.kind}" + (f" {ev.value:+d}" if ev.kind == "turn" else "")
         self.input_log = (self.input_log + [f"{desc} (código {ev.code:#04x})"])[-20:]
         log.debug("Entrada: %s", desc)
@@ -425,6 +440,65 @@ class Controller:
         elif ev.control == "unknown":
             log.info("Entrada desconocida, código %#04x. Puedes mapearla en "
                      "device.input_map de la configuración.", ev.code)
+
+    # ================================================================ energía
+    def screen_off(self) -> None:
+        """Apaga la pantalla del AKP03 ya mismo (síncrono) y deja de dibujar."""
+        with self._io_lock:
+            already = self._screen_off
+            self._screen_off = True
+            self._safe_device(lambda d: d.shutdown())
+        if not already:
+            log.info("Pantalla del AKP03 apagada")
+
+    def screen_on(self) -> None:
+        """Vuelve a encender la pantalla y redibuja todas las teclas."""
+        with self._io_lock:
+            if not self._screen_off:
+                return
+            self._screen_off = False
+            self._last_sent = [None] * NUM_KEYS
+            self._last_raw = [None] * NUM_KEYS
+            brightness = self.config["device"]["brightness"]
+            self._safe_device(lambda d: d.initialize(brightness))
+        log.info("Pantalla del AKP03 encendida")
+        self.wake()
+
+    @property
+    def screen_is_off(self) -> bool:
+        return self._screen_off
+
+    def power_shutdown(self) -> None:
+        """El PC se apaga, reinicia o cierra sesión: apagar las teclas antes de
+        que Windows termine el programa (los USB pueden seguir con corriente)."""
+        self._shutting_down = True
+        self.screen_off()
+        if self._save_at is not None:
+            self._save()
+
+    def power_suspend(self) -> None:
+        self.screen_off()
+
+    def power_resume(self) -> None:
+        """Al despertar (o si se canceló el apagado) se reconecta y redibuja: tras
+        suspender, la conexión USB anterior puede no servir."""
+        self._shutting_down = False
+        with self._io_lock:
+            self._screen_off = False
+            self._last_sent = [None] * NUM_KEYS
+            self._last_raw = [None] * NUM_KEYS
+        if self.device is not None:
+            self._device_failed.set()
+        self.wake()
+
+    def display_changed(self, on: bool) -> None:
+        """El monitor del PC se apagó/encendió por inactividad."""
+        if self._shutting_down:
+            return
+        if on:
+            self.screen_on()
+        else:
+            self.screen_off()
 
     # ================================================================ avisos en pantalla
     def show_overlay(self, overlay: Overlay, seconds: Optional[float] = None) -> None:

@@ -157,6 +157,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
         "start_minimized": False,
         "minimize_to_tray": True,
+        # Apagar las teclas cuando Windows apaga el monitor por inactividad.
+        "screen_off_with_monitor": True,
     },
 }
 
