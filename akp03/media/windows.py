@@ -16,6 +16,7 @@ import logging
 import sys
 import threading
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -209,6 +210,50 @@ class _Volume:
         return True
 
 
+class ArtTracker:
+    """Decide cuándo leer la carátula y cuál mostrar.
+
+    Al cambiar de canción, Windows actualiza primero el título y un momento después
+    la miniatura (Spotify siempre, a veces los navegadores). Si se lee sólo una vez
+    se queda la carátula de la canción anterior. Por eso, durante los primeros
+    segundos de cada canción se relee en cada consulta y después cada poco tiempo.
+    """
+
+    SETTLE_SECONDS = 8.0  # tras cambiar de canción: releer en cada consulta
+    SETTLE_INTERVAL = 0.9
+    RECHECK_INTERVAL = 15.0  # después: comprobar de vez en cuando
+    MAX_TRACKS = 20
+
+    def __init__(self):
+        self._art: dict[str, bytes] = {}
+        self._first_seen: dict[str, float] = {}
+        self._last_read: dict[str, float] = {}
+
+    def needs_read(self, key: str, now: float) -> bool:
+        first = self._first_seen.setdefault(key, now)
+        last = self._last_read.get(key)
+        if last is None:
+            return True
+        interval = self.SETTLE_INTERVAL if now - first < self.SETTLE_SECONDS else self.RECHECK_INTERVAL
+        return now - last >= interval
+
+    def store(self, key: str, now: float, art: Optional[bytes]) -> None:
+        self._first_seen.setdefault(key, now)
+        self._last_read[key] = now
+        if art:
+            self._art[key] = art
+        if len(self._first_seen) > self.MAX_TRACKS:  # olvidar canciones antiguas
+            for old in list(self._first_seen)[: -self.MAX_TRACKS]:
+                for d in (self._art, self._first_seen, self._last_read):
+                    d.pop(old, None)
+
+    def current(self, key: str) -> tuple[Optional[bytes], str]:
+        """(carátula, clave) — la clave cambia si cambian los bytes de la imagen,
+        para que las teclas se redibujen."""
+        art = self._art.get(key)
+        return art, f"{key}|{zlib.crc32(art):08x}" if art else key
+
+
 class WindowsMediaBackend(MediaBackend):
     name = "windows"
 
@@ -228,8 +273,7 @@ class WindowsMediaBackend(MediaBackend):
 
         self._session = None
         self._app_stems: set[str] = set()
-        self._art_cache: dict[str, bytes] = {}
-        self._art_attempts: dict[str, float] = {}
+        self._art = ArtTracker()
 
     # ------------------------------------------------------------ hilo propio
     def _run(self) -> None:
@@ -383,23 +427,15 @@ class WindowsMediaBackend(MediaBackend):
             log.debug("Sin línea de tiempo: %s", exc)
 
         key = state.track_key
-        state.art_key = key
-        if key in self._art_cache:
-            state.art = self._art_cache[key]
-        elif props.thumbnail is not None and time.monotonic() - self._art_attempts.get(key, 0) > 2:
-            # Spotify a veces publica la miniatura un poco después del título.
-            self._art_attempts[key] = time.monotonic()
+        now = time.monotonic()
+        if props.thumbnail is not None and self._art.needs_read(key, now):
             try:
                 art = await self._read_thumbnail(props.thumbnail)
             except Exception as exc:  # noqa: BLE001
                 log.debug("No se pudo leer la miniatura: %s", exc)
                 art = None
-            if art:
-                if len(self._art_cache) > 20:
-                    self._art_cache.clear()
-                    self._art_attempts.clear()
-                self._art_cache[key] = art
-                state.art = art
+            self._art.store(key, now, art)
+        state.art, state.art_key = self._art.current(key)
         return state
 
     def get_state(self) -> MediaState:

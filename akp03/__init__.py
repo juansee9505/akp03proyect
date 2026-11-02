@@ -5,5 +5,5 @@ permite controlar la música con las teclas y perillas y personalizar cada
 tecla con imágenes o animaciones GIF.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 APP_NAME = "AKP03 Controller"
