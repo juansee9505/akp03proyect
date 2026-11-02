@@ -37,12 +37,14 @@ class PowerEvents:
 
     def __init__(self, on_shutdown: Callable[[], None], on_suspend: Callable[[], None],
                  on_resume: Callable[[], None], on_display: Callable[[bool], None],
-                 display_enabled: Callable[[], bool] = lambda: True):
+                 display_enabled: Callable[[], bool] = lambda: True,
+                 on_exit: Optional[Callable[[], None]] = None):
         self.on_shutdown = on_shutdown
         self.on_suspend = on_suspend
         self.on_resume = on_resume
         self.on_display = on_display
         self.display_enabled = display_enabled
+        self.on_exit = on_exit
         self._suspended = False
 
     def dispatch(self, msg: int, wparam: int, setting_value: Optional[int] = None) -> Optional[int]:
@@ -57,6 +59,10 @@ class PowerEvents:
             if msg == WM_ENDSESSION:
                 if wparam:
                     self.on_shutdown()
+                    # La sesión termina de verdad (apagado, o el instalador cerrando
+                    # el programa para actualizarlo): salir de forma ordenada.
+                    if self.on_exit:
+                        self.on_exit()
                 else:  # otro programa canceló el apagado
                     self.on_resume()
                 return 0

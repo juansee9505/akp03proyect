@@ -14,8 +14,11 @@ como **control de música**, sin necesidad del software oficial.
   volumen de fuentes, guardar repetición, cámara virtual.
 - Avisos en las teclas: volumen, «Mic OFF», «Grabando», escena actual…
 - Cada tecla se puede **personalizar con tu propia imagen o animación GIF**.
-- Ventana con **vista previa en vivo** de las teclas y toda la configuración.
-- Se queda en la **bandeja del sistema** y puede **iniciar con Windows**.
+- Ventana con **vista previa en vivo** de las teclas y toda la configuración, con tema
+  **oscuro o claro** estilo Windows 11 (sigue el tema de Windows).
+- Se queda en la **bandeja del sistema** (al pasar el ratón muestra la canción; clic derecho:
+  play/pausa, siguiente, anterior) y puede **iniciar con Windows**.
+- Títulos en japonés, coreano y chino; reloj en las teclas cuando no suena nada.
 
 ## Distribución por defecto
 
@@ -72,7 +75,8 @@ solo cuando lo abras.
 
 1. **Cierra el software oficial de Ajazz / Stream Dock** (sólo un programa puede usar el
    dispositivo a la vez; desactiva también su inicio automático).
-2. Descarga `AKP03Controller-Setup.exe` (instalador) o `AKP03Controller.exe` (portable) desde
+2. Descarga `AKP03Controller-Setup.exe` (instalador, recomendado) o
+   `AKP03Controller-portable.exe` (un solo archivo, sin instalar) desde
    la pestaña **Actions** (artefacto `AKP03Controller-windows`) o desde **Releases** del repositorio.
 3. Ejecútalo. No requiere drivers ni permisos de administrador.
 
@@ -87,7 +91,8 @@ Con Python 3.10+ para Windows instalado:
 packaging\build_windows.bat
 ```
 
-Genera `dist\AKP03Controller.exe` (y `dist\AKP03Controller-Setup.exe` si tienes
+Genera `dist\AKP03Controller\` (versión en carpeta), `dist\AKP03Controller-portable.exe`
+(y `dist\AKP03Controller-Setup.exe` si tienes
 [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
 
 Cada vez que se sube un cambio a GitHub, el workflow `.github/workflows/build.yml` compila el
@@ -143,6 +148,16 @@ python -m akp03 --demo --no-device  # prueba la interfaz con música simulada
 python -m akp03 --headless       # sin ventana
 ```
 
+### Diagnóstico
+
+- Sólo puede haber una copia abierta: si lo abres otra vez, se muestra la ventana de la
+  que ya está funcionando.
+- *General → Abrir carpeta de configuración y registros*: ahí está `akp03.log`, con
+  cualquier error (útil para reportar problemas).
+- `AKP03Controller.exe --self-test resultado.txt` comprueba que la instalación está completa
+  (librerías, tema, API multimedia, audio). GitHub lo ejecuta en Windows tras cada
+  compilación; el informe va junto a la descarga (`selftest-*.txt`).
+
 ## Ejecutar desde el código
 
 ```bash
@@ -170,6 +185,8 @@ sudo udevadm control --reload && sudo udevadm trigger
 | `akp03/render.py`, `akp03/icons.py` | Dibujo de cada tecla, texto desplazable, GIF animados |
 | `akp03/obs.py` | Cliente de obs-websocket v5 y acciones de OBS |
 | `akp03/power.py` | Avisos de Windows: apagar, suspender, monitor apagado |
+| `akp03/instance.py` | Una sola copia abierta a la vez |
+| `akp03/selftest.py` | Autoprueba del ejecutable (`--self-test`) |
 | `akp03/controller.py` | Une todo: entradas → acciones, estado → imágenes, reconexión automática |
 | `akp03/gui.py` | Ventana de configuración y vista previa |
 | `packaging/` | Compilación del .exe e instalador |

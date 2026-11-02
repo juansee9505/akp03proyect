@@ -8,6 +8,8 @@ import logging
 import os
 import shutil
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -159,6 +161,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "minimize_to_tray": True,
         # Apagar las teclas cuando Windows apaga el monitor por inactividad.
         "screen_off_with_monitor": True,
+        # Tema de la ventana: "system" (como Windows), "dark" o "light".
+        "theme": "system",
     },
 }
 
@@ -255,6 +259,8 @@ def normalize(cfg: dict) -> dict:
     if len(dev["image_key_ids"]) != NUM_KEYS:
         dev["image_key_ids"] = list(DEFAULT_CONFIG["device"]["image_key_ids"])
     cfg["display"]["fps"] = max(1, min(30, int(cfg["display"]["fps"])))
+    if cfg["app"].get("theme") not in ("system", "dark", "light"):
+        cfg["app"]["theme"] = "system"
     return cfg
 
 
@@ -272,10 +278,22 @@ def load_config(path: Path | None = None) -> dict:
 def save_config(cfg: dict, path: Path | None = None) -> None:
     path = Path(path or default_config_path())
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    # En Windows el antivirus o el indexador pueden bloquear el archivo un instante.
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def import_media_file(src: str | Path, base_dir: Path | None = None) -> str:

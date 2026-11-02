@@ -2,7 +2,7 @@
 #define AppName "AKP03 Controller"
 #define AppVersion GetEnv("AKP03_VERSION")
 #if AppVersion == ""
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #endif
 
 [Setup]
@@ -20,6 +20,10 @@ UninstallDisplayIcon={app}\AKP03Controller.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Si el programa está abierto al actualizar, se cierra solo (sale de forma
+; ordenada al recibir el aviso de Windows) y se vuelve a abrir al terminar.
+CloseApplications=force
+RestartApplications=no
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -28,8 +32,12 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
 Name: "autostart"; Description: "Iniciar con Windows"; GroupDescription: "Inicio:"
 
+[InstallDelete]
+; Restos de versiones anteriores (antes era un único .exe; ahora es una carpeta).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
-Source: "..\dist\AKP03Controller.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\AKP03Controller\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\AKP03Controller.exe"
@@ -41,3 +49,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\AKP03Controller.exe"; Description: "Abrir {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Si el usuario activó «Iniciar con Windows» desde la ventana del programa, el
+// desinstalador también lo quita (si no, Windows intentaría abrir un .exe borrado).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'AKP03Controller');
+end;

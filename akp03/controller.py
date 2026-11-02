@@ -83,6 +83,8 @@ class Controller:
         self.obs = OBSActions(OBSClient(obs_cfg["host"], obs_cfg["port"], obs_cfg["password"]))
 
         self._lock = threading.RLock()
+        self._render_lock = threading.Lock()  # no cambiar la config a mitad de un cuadro
+        self._save_lock = threading.Lock()
         self._stop = threading.Event()
         self._refresh = threading.Event()
         self._events: "queue.Queue[InputEvent]" = queue.Queue()
@@ -139,14 +141,29 @@ class Controller:
         return bool(self._threads) and not self._stop.is_set()
 
     # ================================================================ configuración
+    @staticmethod
+    def _visual_settings(cfg: dict):
+        """Lo de la configuración que cambia cómo se ven las teclas."""
+        dev = cfg.get("device", {})
+        return (cfg.get("keys"), cfg.get("display"),
+                tuple(dev.get(k) for k in ("key_size", "rotation", "flip", "image_key_ids", "jpeg_quality")))
+
     def apply_config(self, config: dict) -> None:
-        """Aplica una configuración nueva en caliente."""
-        with self._lock:
+        """Aplica una configuración nueva en caliente.
+
+        Sólo se redibuja todo si cambió algo visual: mover el brillo o editar OBS
+        no reenvía las 6 teclas en cada pequeño cambio.
+        """
+        with self._lock, self._render_lock:
             old_dev = self.config.get("device", {})
+            visual_changed = self._visual_settings(self.config) != self._visual_settings(config)
             self.config = config
-            self.renderer.update_config(config)
-            self._last_sent = [None] * NUM_KEYS
-            self._last_raw = [None] * NUM_KEYS
+            if visual_changed:
+                self.renderer.update_config(config)
+                self._last_sent = [None] * NUM_KEYS
+                self._last_raw = [None] * NUM_KEYS
+            else:
+                self.renderer.config = config
             new_dev = config["device"]
             reconnect = any(old_dev.get(k) != new_dev.get(k) for k in ("vid", "pid", "packet_size"))
         obs_cfg = config["obs"]
@@ -156,7 +173,8 @@ class Controller:
                 self._device_failed.set()
             else:
                 self.device.input_map = build_input_map(new_dev.get("input_map"))
-                self._safe_device(lambda d: d.set_brightness(new_dev["brightness"]))
+                if old_dev.get("brightness") != new_dev["brightness"]:
+                    self._safe_device(lambda d: d.set_brightness(new_dev["brightness"]))
 
     def identify(self, seconds: float = 8.0) -> None:
         """Muestra los números 1..6 en las teclas durante unos segundos."""
@@ -168,10 +186,11 @@ class Controller:
 
     def _save(self) -> None:
         self._save_at = None
-        try:
-            save_config(self.config, self.config_path)
-        except OSError as exc:
-            log.error("No se pudo guardar la configuración: %s", exc)
+        with self._save_lock:  # la ventana y el bucle principal pueden guardar a la vez
+            try:
+                save_config(self.config, self.config_path)
+            except OSError as exc:
+                log.error("No se pudo guardar la configuración: %s", exc)
 
     # ================================================================ dispositivo
     @staticmethod
@@ -185,19 +204,24 @@ class Controller:
             log.log(level, text)
 
     def _try_connect(self) -> None:
+        dev = None
         try:
             dev = self._device_opener(self.config)
             dev.initialize(self.config["device"]["brightness"])
-        except DeviceError as exc:
-            self._set_status(str(exc))
-            return
         except Exception as exc:  # noqa: BLE001
-            self._set_status(f"Error abriendo el dispositivo: {exc}", logging.ERROR)
+            # Si se abrió pero falló al inicializar, cerrar la conexión: si no, se
+            # acumularía una conexión USB abierta en cada reintento.
+            if dev is not None:
+                dev.close(blank=False)
+            if isinstance(exc, DeviceError):
+                self._set_status(str(exc))
+            else:
+                self._set_status(f"Error abriendo el dispositivo: {exc}", logging.ERROR)
             return
         self._device_failed.clear()
         self._last_sent = [None] * NUM_KEYS
         self._last_raw = [None] * NUM_KEYS
-        with self._lock:
+        with self._render_lock:
             self.renderer.set_auto_key_size(dev.profile.key_size)
         self.device = dev
         self._set_status(f"Conectado: {dev.name}")
@@ -346,12 +370,15 @@ class Controller:
         self._close_device(blank=True)
 
     def _render(self, now: float):
-        if now < self._identify_until:
-            return self.renderer.render_identify()
+        # Orden de cerrojos siempre _lock -> _render_lock (como en apply_config):
+        # el estado se copia antes, sin anidar al revés.
         with self._lock:
             state = self.state
         overlay = self._overlay if now < self._overlay_until else None
-        return self.renderer.render(state, now, overlay=overlay)
+        with self._render_lock:
+            if now < self._identify_until:
+                return self.renderer.render_identify()
+            return self.renderer.render(state, now, overlay=overlay)
 
     def _media_loop(self) -> None:
         while not self._stop.is_set():

@@ -221,6 +221,9 @@ class WindowsMediaBackend(MediaBackend):
         self._thread.start()
         self._ready.wait(15)
         if self._init_error:
+            self._thread.join(timeout=1)
+            if not self._loop.is_running():
+                self._loop.close()
             raise self._init_error
 
         self._session = None
@@ -239,13 +242,22 @@ class WindowsMediaBackend(MediaBackend):
             self._init_error = exc
             self._ready.set()
             return
-        try:
-            self._volume: Optional[_Volume] = _Volume()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("pycaw no disponible (%s); el volumen usará teclas multimedia", exc)
-            self._volume = None
+        self._volume: Optional[_Volume] = None
+        self._volume_retry_at = 0.0
+        self._ensure_volume()
         self._ready.set()
         self._loop.run_forever()
+
+    def _ensure_volume(self) -> None:
+        """Crea el acceso al volumen (pycaw). Si falla (servicio de audio aún no
+        listo al iniciar sesión) se reintenta cada 15 s. Sólo en el hilo WinRT."""
+        if self._volume is not None or time.monotonic() < self._volume_retry_at:
+            return
+        try:
+            self._volume = _Volume()
+        except Exception as exc:  # noqa: BLE001
+            self._volume_retry_at = time.monotonic() + 15
+            log.warning("El volumen de Windows aún no está disponible (%s); se reintentará", exc)
 
     @staticmethod
     async def _await(op):
@@ -309,6 +321,7 @@ class WindowsMediaBackend(MediaBackend):
 
     async def _get_state_async(self) -> MediaState:
         state = MediaState()
+        self._ensure_volume()
         if self._volume is not None:
             try:
                 state.volume, state.muted = self._volume.get()

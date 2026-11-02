@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
+import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -14,7 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from . import APP_NAME, __version__, autostart
 from .config import (ACTIONS, KEY_TYPES, KNOB_TURN_ACTIONS, NUM_BUTTONS, NUM_KEYS, NUM_KNOBS,
-                     import_media_file, normalize)
+                     config_dir, import_media_file, normalize)
 from .obs import OBSActions, OBSClient, OBSError
 from .controller import Controller
 from .device import InputEvent
@@ -80,17 +84,37 @@ def _inverse(d: dict) -> dict:
 
 
 class _Tray:
-    """Icono en la bandeja del sistema (opcional, requiere pystray)."""
+    """Icono en la bandeja del sistema (opcional, requiere pystray).
 
-    def __init__(self, image: Image.Image, on_open: Callable, on_quit: Callable):
+    Sus menús se ejecutan en el hilo de pystray: nunca tocan Tk directamente.
+    """
+
+    def __init__(self, image: Image.Image, on_open: Callable, on_quit: Callable,
+                 on_action: Callable[[str], None]):
         import pystray  # type: ignore
 
         menu = pystray.Menu(
             pystray.MenuItem("Abrir", lambda *_: on_open(), default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("⏯  Play / Pausa", lambda *_: on_action("play_pause")),
+            pystray.MenuItem("⏭  Siguiente", lambda *_: on_action("next")),
+            pystray.MenuItem("⏮  Anterior", lambda *_: on_action("previous")),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Salir", lambda *_: on_quit()),
         )
         self.icon = pystray.Icon("akp03", image, APP_NAME, menu)
         self.icon.run_detached()
+        self._title = APP_NAME
+
+    def set_title(self, text: str) -> None:
+        """Texto al pasar el ratón por el icono (Windows admite hasta 127 caracteres)."""
+        text = text[:127]
+        if text != self._title:
+            self._title = text
+            try:
+                self.icon.title = text
+            except Exception:  # noqa: BLE001
+                pass
 
     def stop(self):
         try:
@@ -99,12 +123,58 @@ class _Tray:
             pass
 
 
+def _enable_dpi_awareness() -> None:
+    """Sin esto Windows estira la ventana en pantallas al 125-150 % y se ve borrosa."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def windows_prefers_dark() -> bool:
+    """Tema de aplicaciones de Windows (Configuración → Personalización → Colores)."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+THEME_LABELS = {"system": "Como Windows", "dark": "Oscuro", "light": "Claro"}
+PALETTES = {
+    "dark": {"hint": "#9b9ba3", "ok": "#3ddc84", "text_bg": "#1c1c1c", "text_fg": "#e6e6e6",
+             "select": "#2f6f4a", "accent": "#1DB954"},
+    "light": {"hint": "#666666", "ok": "#1e8a4c", "text_bg": "#ffffff", "text_fg": "#1a1a1a",
+              "select": "#cde8d8", "accent": "#1a9e48"},
+}
+
+
 class App:
     def __init__(self, controller: Controller, start_minimized: bool = False):
         self.ctrl = controller
+        _enable_dpi_awareness()
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} {__version__}")
         self.root.minsize(860, 560)
+        # Errores en botones/eventos de la ventana: al registro, no a una consola inexistente.
+        self.root.report_callback_exception = lambda et, ev, tb: log.error(
+            "Error en la interfaz", exc_info=(et, ev, tb))
+        self._ui_calls: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._closing = False
+        self._palette = PALETTES["dark"]
+        self._dark = True
+        dpi_scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
+        self._preview_size = int(PREVIEW_SIZE * dpi_scale)
         self._photos: list[Optional[ImageTk.PhotoImage]] = [None] * NUM_KEYS
         self._preview_src: list = [None] * NUM_KEYS
         self._last_frame_id = -1
@@ -118,7 +188,9 @@ class App:
         self._app_icon_tk = ImageTk.PhotoImage(self._app_image)
         self.root.iconphoto(True, self._app_icon_tk)
 
+        self._setup_theme()
         self._build()
+        self._apply_widget_colors()
         self._load_key_editor()
         self._setup_tray()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -163,12 +235,6 @@ class App:
     # ================================================================ construcción
     def _build(self):
         root = self.root
-        style = ttk.Style(root)
-        try:
-            style.theme_use("vista" if "vista" in style.theme_names() else "clam")
-        except tk.TclError:
-            pass
-
         main = ttk.Frame(root, padding=10)
         main.pack(fill="both", expand=True)
         main.columnconfigure(1, weight=1)
@@ -179,7 +245,7 @@ class App:
         left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
 
         self.status_var = tk.StringVar(value=self.ctrl.status)
-        ttk.Label(left, textvariable=self.status_var, foreground="#666").pack(anchor="w")
+        ttk.Label(left, textvariable=self.status_var, style="Hint.TLabel").pack(anchor="w")
 
         np = ttk.LabelFrame(left, text="Sonando ahora", padding=8)
         np.pack(fill="x", pady=(6, 8))
@@ -189,7 +255,7 @@ class App:
         ttk.Label(np, textvariable=self.title_var, font=("Segoe UI", 12, "bold"),
                   wraplength=330).pack(anchor="w")
         ttk.Label(np, textvariable=self.artist_var, wraplength=330).pack(anchor="w")
-        ttk.Label(np, textvariable=self.app_var, foreground="#888").pack(anchor="w")
+        ttk.Label(np, textvariable=self.app_var, style="Hint.TLabel").pack(anchor="w")
         ctl = ttk.Frame(np)
         ctl.pack(anchor="w", pady=(6, 0))
         for text, action in (("⏮", "previous"), ("⏯", "play_pause"), ("⏭", "next"),
@@ -200,7 +266,7 @@ class App:
         pv = ttk.LabelFrame(left, text="Vista previa del AKP03 (clic = editar, clic derecho = pulsar)",
                             padding=8)
         pv.pack(fill="x")
-        ks = PREVIEW_SIZE
+        ks = self._preview_size
         grid = tk.Frame(pv, bg="#222", padx=6, pady=6)
         grid.pack()
         self.key_labels: list[tk.Label] = []
@@ -246,7 +312,7 @@ class App:
         bottom = ttk.Frame(main)
         bottom.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.saved_var = tk.StringVar()
-        ttk.Label(bottom, textvariable=self.saved_var, foreground="#2a7").pack(side="left")
+        ttk.Label(bottom, textvariable=self.saved_var, style="Ok.TLabel").pack(side="left")
         ttk.Button(bottom, text="Salir", command=self.quit).pack(side="right")
 
     # ---------------------------------------------------------------- pestaña teclas
@@ -301,7 +367,7 @@ class App:
             "• En «Imagen / animación propia» puedes usar GIF animados.\n"
             "• En el panel, tu imagen sustituye al fondo difuminado de la carátula."
         )
-        ttk.Label(f, text=help_text, foreground="#666", wraplength=420, justify="left").grid(
+        ttk.Label(f, text=help_text, style="Hint.TLabel", wraplength=420, justify="left").grid(
             row=7, column=0, columnspan=3, sticky="w", pady=(16, 0))
         return f
 
@@ -319,9 +385,7 @@ class App:
         action = key.get("action")
         self.key_action_var.set(ACTION_LABELS[action] if action else AUTO_ACTION)
         self.key_target_var.set(key.get("target") or "")
-        for i, lbl in enumerate(self.key_labels):
-            color = "#1DB954" if i == self._selected else "#222"
-            lbl.configure(highlightbackground=color, highlightcolor=color)
+        self._refresh_key_highlight()
         self._loading = False
 
     def _key_changed(self):
@@ -363,7 +427,7 @@ class App:
         f.columnconfigure(3, weight=1)
         ttk.Label(f, text=("Gira o presiona una rueda del AKP03 y se marcará aquí cuál es "
                            "(así sabes cuál es la grande)."),
-                  foreground="#666", wraplength=460).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+                  style="Hint.TLabel", wraplength=460).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
         ttk.Label(f, text="Al girar").grid(row=1, column=1, sticky="w")
         ttk.Label(f, text="Al presionar").grid(row=1, column=2, sticky="w")
         ttk.Label(f, text="Fuente OBS").grid(row=1, column=3, sticky="w")
@@ -371,15 +435,15 @@ class App:
         self.knob_name_labels: list[ttk.Label] = []
         self.target_boxes: list[ttk.Combobox] = []
         for k in range(NUM_KNOBS):
-            name = ttk.Label(f, text=f"Perilla {k + 1}", width=13)
+            name = ttk.Label(f, text=f"Perilla {k + 1}", width=10)
             name.grid(row=k + 2, column=0, sticky="w", pady=3)
             self.knob_name_labels.append(name)
             tv, pv, gv = tk.StringVar(), tk.StringVar(), tk.StringVar()
-            cb1 = ttk.Combobox(f, textvariable=tv, state="readonly", width=21,
+            cb1 = ttk.Combobox(f, textvariable=tv, state="readonly", width=17,
                                values=[KNOB_LABELS[a] for a in KNOB_TURN_ACTIONS])
-            cb2 = ttk.Combobox(f, textvariable=pv, state="readonly", width=19,
+            cb2 = ttk.Combobox(f, textvariable=pv, state="readonly", width=15,
                                values=[ACTION_LABELS[a] for a in ACTIONS if a != "open"])
-            cb3 = ttk.Combobox(f, textvariable=gv, width=12)
+            cb3 = ttk.Combobox(f, textvariable=gv, width=9)
             cb1.grid(row=k + 2, column=1, sticky="ew", padx=3)
             cb2.grid(row=k + 2, column=2, sticky="ew", padx=3)
             cb3.grid(row=k + 2, column=3, sticky="ew", padx=3)
@@ -405,7 +469,7 @@ class App:
                               values=[ACTION_LABELS[a] for a in ACTIONS])
             cb.grid(row=b + 7, column=1, columnspan=2, sticky="ew", padx=3)
             cb.bind("<<ComboboxSelected>>", lambda e: self._controls_changed())
-            e = ttk.Combobox(f, textvariable=tv, width=12)
+            e = ttk.Combobox(f, textvariable=tv, width=9)
             e.grid(row=b + 7, column=3, sticky="ew", padx=3)
             self.target_boxes.append(e)
             e.bind("<<ComboboxSelected>>", lambda ev: self._controls_changed())
@@ -426,7 +490,7 @@ class App:
         ttk.Label(f, text=("Las opciones con «…» usan la columna de la derecha: nombre de la "
                            "escena o fuente de audio de OBS (p. ej. «Mic/Aux»), o el programa/URL. "
                            "Pulsa «Probar conexión» en la pestaña OBS para elegirlas de una lista."),
-                  foreground="#666", wraplength=460, justify="left").grid(
+                  style="Hint.TLabel", wraplength=460, justify="left").grid(
             row=12, column=0, columnspan=4, sticky="w", pady=(10, 0))
         return f
 
@@ -457,7 +521,7 @@ class App:
         ttk.Label(f, text=(
             "En OBS: Herramientas → Ajustes del servidor WebSocket → marca «Habilitar servidor "
             "WebSocket». Pulsa «Mostrar información de conexión» y copia aquí la contraseña."),
-            foreground="#666", wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+            style="Hint.TLabel", wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Label(f, text="Servidor").grid(row=1, column=0, sticky="w")
         self.obs_host_var = tk.StringVar(value=obs["host"])
         ttk.Entry(f, textvariable=self.obs_host_var, width=20).grid(row=1, column=1, sticky="w", pady=3)
@@ -506,7 +570,7 @@ class App:
                 result = ("error", str(exc), None)
             finally:
                 client.close()
-            self.root.after(0, lambda: self._obs_show(result))
+            self.call_soon(lambda: self._obs_show(result))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -562,7 +626,7 @@ class App:
 
         ttk.Label(f, text=("Más cuadros por segundo = animaciones y texto más fluidos, pero más "
                            "tráfico USB. 10-15 es un buen valor."),
-                  foreground="#666", wraplength=420).grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 0))
+                  style="Hint.TLabel", wraplength=420).grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 0))
         return f
 
     def _pick_color(self, field: str, button: tk.Button):
@@ -630,11 +694,11 @@ class App:
         ttk.Label(f, text=("«Identificar teclas» muestra 1-6 en el dispositivo durante 8 s. Si el orden "
                            "no coincide, cambia «Orden de teclas»; si los números salen girados, "
                            "cambia la rotación (la barra de color debe quedar arriba)."),
-                  foreground="#666", wraplength=440, justify="left").grid(
+                  style="Hint.TLabel", wraplength=440, justify="left").grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(10, 6))
 
         self.model_var = tk.StringVar()
-        ttk.Label(f, textvariable=self.model_var, foreground="#2a7").grid(
+        ttk.Label(f, textvariable=self.model_var, style="Ok.TLabel").grid(
             row=8, column=0, columnspan=2, sticky="w", pady=(0, 4))
         ttk.Label(f, text="Últimas entradas recibidas:").grid(row=9, column=0, columnspan=2, sticky="w")
         self.input_list = tk.Listbox(f, height=7)
@@ -694,20 +758,118 @@ class App:
         ttk.Checkbutton(f, text="Iniciar minimizado", variable=self.min_var,
                         command=self._general_changed).pack(anchor="w", pady=3)
         self.tray_var = tk.BooleanVar(value=app["minimize_to_tray"])
-        ttk.Checkbutton(f, text="Al cerrar la ventana, seguir funcionando en la bandeja del sistema",
+        ttk.Checkbutton(f, text="Al cerrar la ventana, seguir en la bandeja",
                         variable=self.tray_var, command=self._general_changed).pack(anchor="w", pady=3)
         self.monitor_var = tk.BooleanVar(value=app["screen_off_with_monitor"])
-        ttk.Checkbutton(f, text="Apagar las teclas cuando Windows apaga el monitor (se encienden al "
-                                "tocar el AKP03 o al volver a usar el PC)",
+        ttk.Checkbutton(f, text="Apagar las teclas cuando se apaga el monitor",
                         variable=self.monitor_var, command=self._general_changed).pack(anchor="w", pady=3)
-        ttk.Label(f, text=("Al apagar, reiniciar o suspender el PC las teclas se apagan siempre."),
-                  foreground="#666").pack(anchor="w", pady=(0, 3))
+        ttk.Label(f, text=("Se encienden al tocar el AKP03 o al volver a usar el PC. Al apagar, "
+                           "reiniciar o suspender el PC las teclas se apagan siempre."),
+                  style="Hint.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(0, 3))
+
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=(12, 3))
+        ttk.Label(row, text="Tema de la ventana:").pack(side="left")
+        self.theme_var = tk.StringVar(value=THEME_LABELS.get(app.get("theme", "system"), THEME_LABELS["system"]))
+        cb = ttk.Combobox(row, textvariable=self.theme_var, state="readonly", width=16,
+                          values=list(THEME_LABELS.values()))
+        cb.pack(side="left", padx=6)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._theme_changed())
+
+        ttk.Button(f, text="Abrir carpeta de configuración y registros",
+                   command=self._open_config_dir).pack(anchor="w", pady=(10, 3))
         ttk.Label(f, text=(
             "Importante: cierra el software oficial de Ajazz / Stream Dock, porque sólo un "
             "programa a la vez puede controlar el dispositivo.\n\n"
-            f"Configuración guardada en:\n{self.ctrl.config_path or '(por defecto)'}"),
-            foreground="#666", wraplength=440, justify="left").pack(anchor="w", pady=(16, 0))
+            f"Configuración guardada en:\n{self.ctrl.config_path or '(por defecto)'}\n\n"
+            f"{APP_NAME} {__version__}"),
+            style="Hint.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(16, 0))
         return f
+
+    def _open_config_dir(self):
+        path = str(config_dir())
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open" if sys.platform != "darwin" else "open", path])
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo abrir la carpeta:\n{exc}")
+
+    def _theme_changed(self):
+        value = _inverse(THEME_LABELS).get(self.theme_var.get(), "system")
+        self._update(lambda cfg: cfg["app"].__setitem__("theme", value))
+        self._setup_theme()
+        self._apply_widget_colors()
+
+    # ---------------------------------------------------------------- tema
+    def _theme_mode(self) -> str:
+        mode = self.cfg["app"].get("theme", "system")
+        if mode == "system":
+            return "dark" if windows_prefers_dark() else "light"
+        return "dark" if mode == "dark" else "light"
+
+    def _setup_theme(self):
+        """Tema Sun Valley (estilo Windows 11) si está disponible."""
+        mode = self._theme_mode()
+        self._palette = PALETTES[mode]
+        style = ttk.Style(self.root)
+        try:
+            import sv_ttk  # type: ignore
+            sv_ttk.set_theme(mode, self.root)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Tema sv_ttk no disponible: %s", exc)
+            try:
+                style.theme_use("vista" if "vista" in style.theme_names() else "clam")
+            except tk.TclError:
+                pass
+            self._palette = PALETTES["light"]
+        style.configure("Hint.TLabel", foreground=self._palette["hint"])
+        style.configure("Ok.TLabel", foreground=self._palette["ok"])
+        self._dark = self._palette is PALETTES["dark"]
+        self.root.after(50, lambda: self._dark_title_bar(self._dark))
+
+    def _dark_title_bar(self, dark: bool) -> None:
+        """Barra de título oscura en Windows 10/11 (DWMWA_USE_IMMERSIVE_DARK_MODE)."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())  # type: ignore[attr-defined]
+            value = ctypes.c_int(1 if dark else 0)
+            for attr in (20, 19):  # 19 en Windows 10 anteriores a 20H1
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(  # type: ignore[attr-defined]
+                        hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _apply_widget_colors(self):
+        """Los widgets clásicos de Tk (no ttk) no siguen el tema: se colorean aquí.
+
+        Las etiquetas de ayuda también: el tema Sun Valley ignora el color de un
+        estilo derivado (``Hint.TLabel``), así que se pone en cada etiqueta.
+        """
+        pal = self._palette
+        colors = {"Hint.TLabel": pal["hint"], "Ok.TLabel": pal["ok"]}
+        pending = [self.root]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, ttk.Label):
+                color = colors.get(str(widget.cget("style")))
+                if color:
+                    widget.configure(foreground=color)
+        for widget in (getattr(self, "input_list", None), getattr(self, "obs_lists", None)):
+            if widget is not None:
+                widget.configure(bg=pal["text_bg"], fg=pal["text_fg"], selectbackground=pal["select"],
+                                 highlightthickness=0, relief="flat", borderwidth=0)
+        self._refresh_key_highlight()
+
+    def _refresh_key_highlight(self):
+        for i, lbl in enumerate(getattr(self, "key_labels", [])):
+            color = self._palette["accent"] if i == self._selected else "#222"
+            lbl.configure(highlightbackground=color, highlightcolor=color)
 
     def _autostart_changed(self):
         try:
@@ -728,7 +890,26 @@ class App:
     def _simulate(self, ev: InputEvent):
         self.ctrl.inject(ev)
 
+    def call_soon(self, fn: Callable[[], None]) -> None:
+        """Pide ejecutar ``fn`` en el hilo de la ventana. Se puede llamar desde
+        cualquier hilo (Tk no es seguro entre hilos: en Windows puede colgarse)."""
+        self._ui_calls.put(fn)
+
     def _tick(self):
+        if self._closing:
+            return
+        while True:
+            try:
+                fn = self._ui_calls.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                log.exception("Error en la interfaz")
+            if self._closing:
+                return
+        self._update_tray_title()
         # Oculta en la bandeja o minimizada: no hay nada que dibujar, se revisa
         # con poca frecuencia sólo para notar cuándo vuelve a mostrarse.
         visible = self.root.state() not in ("withdrawn", "iconic")
@@ -737,7 +918,19 @@ class App:
                 self._refresh()
             except Exception:  # noqa: BLE001
                 log.exception("Error actualizando la interfaz")
-        self.root.after(100 if visible else 500, self._tick)
+        self.root.after(100 if visible else 250, self._tick)
+
+    def _update_tray_title(self):
+        if not self._tray:
+            return
+        st = self.ctrl.state
+        if st.has_media:
+            text = f"{st.title} — {st.artist}" if st.artist else st.title
+            if st.status == "paused":
+                text = "⏸ " + text
+        else:
+            text = APP_NAME
+        self._tray.set_title(text)
 
     def _refresh(self):
         self.status_var.set(self.ctrl.status)
@@ -762,13 +955,13 @@ class App:
         recent = time.monotonic() - when < 4
         for k, lbl in enumerate(self.knob_name_labels):
             if recent and k == idx:
-                lbl.configure(text=f"Perilla {k + 1} ◀", foreground="#1DB954")
+                lbl.configure(text=f"Perilla {k + 1} ◀", foreground=self._palette["accent"])
             else:
                 lbl.configure(text=f"Perilla {k + 1}", foreground="")
 
         if self.ctrl.frame_id != self._last_frame_id and self.ctrl.last_frame:
             self._last_frame_id = self.ctrl.frame_id
-            ks = PREVIEW_SIZE
+            ks = self._preview_size
             for i, img in enumerate(self.ctrl.last_frame[:NUM_KEYS]):
                 if img is self._preview_src[i]:
                     continue  # esta tecla no cambió
@@ -802,21 +995,23 @@ class App:
     # ================================================================ bandeja y cierre
     def _setup_tray(self):
         try:
-            self._tray = _Tray(self._app_image, self._from_tray_open, self._from_tray_quit)
+            self._tray = _Tray(self._app_image, self._from_tray_open, self._from_tray_quit,
+                               self.ctrl.do_action)
         except Exception as exc:  # noqa: BLE001
             log.info("Bandeja del sistema no disponible: %s", exc)
             self._tray = None
 
     def _from_tray_open(self):
-        self.root.after(0, self._show)
+        self.call_soon(self.show)
 
     def _from_tray_quit(self):
-        self.root.after(0, self.quit)
+        self.call_soon(self.quit)
 
-    def _show(self):
+    def show(self):
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        self._dark_title_bar(self._dark)
 
     def _on_close(self):
         if self._tray and self.cfg["app"]["minimize_to_tray"]:
@@ -826,6 +1021,9 @@ class App:
 
     def quit(self):
         """Cierra la ventana; quien llamó a run() detiene el controlador."""
+        if self._closing:
+            return
+        self._closing = True
         if self._save_job:
             self.root.after_cancel(self._save_job)
             self._save()

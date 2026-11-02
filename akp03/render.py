@@ -42,14 +42,63 @@ _FONT_CANDIDATES = {
 }
 
 
-@lru_cache(maxsize=64)
-def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+# Fuentes de respaldo para escrituras que Segoe UI/Arial no tienen (vienen con Windows).
+_SCRIPT_FONTS = {
+    "hangul": {True: ["malgunbd.ttf", "NotoSansCJK-Bold.ttc"],
+               False: ["malgun.ttf", "NotoSansCJK-Regular.ttc"]},
+    "cjk": {True: ["YuGothB.ttc", "msyhbd.ttc", "msjhbd.ttc", "NotoSansCJK-Bold.ttc"],
+            False: ["YuGothM.ttc", "msyh.ttc", "meiryo.ttc", "msgothic.ttc", "NotoSansCJK-Regular.ttc"]},
+}
+
+
+def text_script(text: str) -> str:
+    """'hangul', 'cjk' o 'latin' según los caracteres del texto."""
+    script = "latin"
+    for ch in text:
+        o = ord(ch)
+        if 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
+            return "hangul"
+        if 0x2E80 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or 0xFF00 <= o <= 0xFFEF:
+            script = "cjk"
+    return script
+
+
+_EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0xFE00, 0xFE0F),
+                 (0x200D, 0x200D), (0xE0000, 0xE007F), (0x1F1E6, 0x1F1FF))
+
+
+def clean_text(text: str) -> str:
+    """Quita emojis (Pillow no los dibuja: saldrían cuadros) y espacios sobrantes."""
+    if not text:
+        return ""
+    kept = "".join(ch for ch in text
+                   if not any(a <= ord(ch) <= b for a, b in _EMOJI_RANGES))
+    return " ".join(kept.split())
+
+
+def font_for(text: str, size: int, bold: bool = False) -> ImageFont.ImageFont:
+    """Fuente adecuada para ``text`` (con respaldo para coreano, japonés y chino)."""
+    return font(size, bold, text_script(text))
+
+
+def _font_dirs() -> list[str]:
     dirs = [""]
     if sys.platform == "win32":
         dirs.append(os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"))
+        local = os.environ.get("LOCALAPPDATA")
+        if local:  # fuentes instaladas sólo para el usuario
+            dirs.append(os.path.join(local, "Microsoft", "Windows", "Fonts"))
     dirs += ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/TTF",
-             "/usr/share/fonts/dejavu", "/usr/share/fonts/truetype/liberation"]
-    for name in _FONT_CANDIDATES[bold]:
+             "/usr/share/fonts/dejavu", "/usr/share/fonts/truetype/liberation",
+             "/usr/share/fonts/opentype/noto", "/usr/share/fonts/noto-cjk"]
+    return dirs
+
+
+@lru_cache(maxsize=96)
+def font(size: int, bold: bool = False, script: str = "latin") -> ImageFont.ImageFont:
+    dirs = _font_dirs()
+    candidates = list(_SCRIPT_FONTS.get(script, {}).get(bold, [])) + _FONT_CANDIDATES[bold]
+    for name in candidates:
         for d in dirs:
             try:
                 return ImageFont.truetype(os.path.join(d, name) if d else name, size)
@@ -81,6 +130,9 @@ def text_strip(text: str, fnt, fill: tuple, gap: int = 0) -> Image.Image:
     return layer
 
 
+_WEEKDAYS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
+
+
 def fmt_time(seconds: Optional[float]) -> str:
     if seconds is None:
         return ""
@@ -105,10 +157,10 @@ def fit_text(draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int,
              min_size: int, bold: bool = True):
     """Fuente más grande que hace caber `text`; si no cabe, se recorta con «…»."""
     for sz in range(size, min_size - 1, -1):
-        fnt = font(sz, bold)
+        fnt = font_for(text, sz, bold)
         if text_width(draw, text, fnt) <= max_width:
             return fnt, text
-    fnt = font(min_size, bold)
+    fnt = font_for(text, min_size, bold)
     while len(text) > 1 and text_width(draw, text + "…", fnt) > max_width:
         text = text[:-1]
     return fnt, text.rstrip() + "…"
@@ -119,13 +171,13 @@ def fit_lines(draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int,
     """Como fit_text pero permite partir el texto en dos líneas."""
     single_min = max(min_size, int(size * 0.7))
     for sz in range(size, single_min - 1, -1):
-        fnt = font(sz, bold)
+        fnt = font_for(text, sz, bold)
         if text_width(draw, text, fnt) <= max_width:
             return fnt, [text]
     words = text.split()
     if len(words) > 1:
         for sz in range(single_min, min_size - 1, -1):
-            fnt = font(sz, bold)
+            fnt = font_for(text, sz, bold)
             best = None
             for i in range(1, len(words)):
                 a, b = " ".join(words[:i]), " ".join(words[i:])
@@ -137,7 +189,7 @@ def fit_lines(draw: ImageDraw.ImageDraw, text: str, max_width: int, size: int,
             if best:
                 return fnt, best[1]
         # Dos líneas: la segunda se recorta si hace falta.
-        fnt = font(min_size, bold)
+        fnt = font_for(text, min_size, bold)
         first = words[0]
         for i in range(len(words) - 1, 0, -1):
             if text_width(draw, " ".join(words[:i]), fnt) <= max_width:
@@ -435,6 +487,7 @@ class Renderer:
 
     def _draw_overlay(self, img: Image.Image, n: int, ov: Overlay) -> None:
         s = self.size
+        ov = Overlay(ov.icon, clean_text(ov.text) or "—", clean_text(ov.subtitle), ov.frac, ov.alert)
         w = s * n
         d = ImageDraw.Draw(img)
         pad = max(3, s // 12)
@@ -464,12 +517,32 @@ class Renderer:
             y = int(s * 0.82)
             self._bar(img, pad, y, w - pad, y + max(3, s // 15), ov.frac, bar_color)
 
+    def _draw_idle(self, img: Image.Image, n: int) -> None:
+        """Sin música: reloj y fecha (cada dato en su tecla, sin cruzar el hueco)."""
+        s = self.size
+        d = ImageDraw.Draw(img)
+        lt = time.localtime()
+        hhmm = time.strftime("%H:%M", lt)
+        date = f"{_WEEKDAYS[lt.tm_wday]} {lt.tm_mday:02d}/{lt.tm_mon:02d}"
+        if n >= 2:
+            d.text((s // 2, int(s * 0.46)), hhmm, font=font(max(10, int(s * 0.31)), True),
+                   fill=WHITE, anchor="mm")
+            cx = s + (img.width - s) // 2
+            f, date = fit_text(d, date, s - 2 * max(3, s // 12), max(8, int(s * 0.18)), 7)
+            d.text((cx, int(s * 0.36)), date, font=f, fill=WHITE, anchor="mm")
+            d.text((cx, int(s * 0.64)), "Sin música", font=font(max(7, int(s * 0.14))),
+                   fill=GREY, anchor="mm")
+        else:
+            d.text((s // 2, int(s * 0.42)), hhmm, font=font(max(10, int(s * 0.30)), True),
+                   fill=WHITE, anchor="mm")
+            d.text((s // 2, int(s * 0.74)), "Sin música", font=font(max(7, int(s * 0.14))),
+                   fill=GREY, anchor="mm")
+
     def _render_panel(self, key: dict, n: int, state: MediaState, now: float,
                       overlay: Optional[Overlay]) -> Image.Image:
         s = self.size
         w = s * n
         img = self._panel_background(key, state, now, w)
-        d = ImageDraw.Draw(img)
         pad = max(3, s // 12)
 
         if overlay is not None:
@@ -477,21 +550,22 @@ class Renderer:
             return img
 
         if not state.has_media:
-            f = font(max(9, int(s * 0.20)), True)
-            d.text((w // 2, s // 2), "Sin música", font=f, fill=GREY, anchor="mm")
+            self._draw_idle(img, n)
             return img
 
         t = now - self._track_since
         inner = w - 2 * pad
-        self._marquee(img, state.title or "—", font(max(9, int(s * 0.24)), True),
+        title = clean_text(state.title) or "—"
+        artist = clean_text(state.artist)
+        self._marquee(img, title, font_for(title, max(9, int(s * 0.24)), True),
                       pad, int(s * 0.05), inner, t, WHITE)
-        self._marquee(img, state.artist, font(max(8, int(s * 0.18))),
+        self._marquee(img, artist, font_for(artist, max(8, int(s * 0.18))),
                       pad, int(s * 0.37), inner, t, GREY)
 
         small = font(max(7, int(s * 0.14)))
         y_info = int(s * 0.64)
         status = {"playing": "▶ ", "paused": "❚❚ "}.get(state.status, "")
-        app = state.app
+        app = clean_text(state.app)
         if status and not _font_has(small, status.strip()):
             status = ""
         self._text(img, pad, y_info, f"{status}{app}", small, GREY)

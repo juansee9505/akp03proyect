@@ -18,7 +18,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
       - run: pip install -r requirements.txt pytest
+      - name: Autoprueba (Linux)
+        run: |
+          status=0
+          xvfb-run python -m akp03 --self-test selftest.txt || status=$?
+          cat selftest.txt
+          exit $status
       - run: python -m pytest -q
 
   windows:
@@ -33,23 +40,31 @@ jobs:
       - name: Compilar ejecutable e instalador
         shell: cmd
         env:
-          AKP03_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.1.0' }}
+          AKP03_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: packaging\build_windows.bat
-      - name: Comprobar que el .exe arranca
+      - name: Autoprueba de los ejecutables en Windows
         shell: pwsh
         run: |
-          $p = Start-Process dist\AKP03Controller.exe -ArgumentList "--version" -PassThru -Wait
-          if ($p.ExitCode -ne 0) { exit 1 }
+          $fail = $false
+          foreach ($exe in @("dist\AKP03Controller\AKP03Controller.exe", "dist\AKP03Controller-portable.exe")) {
+            $out = Join-Path $PWD ("selftest-" + [IO.Path]::GetFileNameWithoutExtension($exe) + ".txt")
+            $p = Start-Process $exe -ArgumentList "--self-test", "`"$out`"" -PassThru -Wait
+            Write-Host "===== $exe (código $($p.ExitCode)) ====="
+            if (Test-Path $out) { Get-Content $out } else { Write-Host "No se generó el informe" }
+            if ($p.ExitCode -ne 0 -or -not (Test-Path $out)) { $fail = $true }
+          }
+          if ($fail) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: AKP03Controller-windows
           path: |
-            dist/AKP03Controller.exe
+            dist/AKP03Controller-portable.exe
             dist/AKP03Controller-Setup.exe
+            selftest-*.txt
       - name: Publicar release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/AKP03Controller.exe
+            dist/AKP03Controller-portable.exe
             dist/AKP03Controller-Setup.exe

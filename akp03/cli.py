@@ -27,6 +27,29 @@ def _setup_logging(verbose: bool) -> None:
         pass
     logging.basicConfig(level=level, handlers=handlers,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _log_uncaught_errors()
+
+
+def _log_uncaught_errors() -> None:
+    """El .exe no tiene consola: cualquier error inesperado va al registro
+    (akp03.log) en vez de perderse."""
+    log = logging.getLogger("akp03")
+
+    def excepthook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        log.critical("Error no controlado", exc_info=(exc_type, exc, tb))
+
+    def thread_excepthook(args):
+        if args.exc_type is SystemExit:
+            return
+        log.critical("Error no controlado en el hilo %s",
+                     args.thread.name if args.thread else "?",
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = excepthook
+    threading.excepthook = thread_excepthook
 
 
 def _debug_input(cfg: dict) -> int:
@@ -60,9 +83,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--list-devices", action="store_true", help="listar dispositivos HID y salir")
     p.add_argument("--debug-input", action="store_true", help="mostrar los códigos de cada tecla/perilla")
     p.add_argument("--identify", action="store_true", help="mostrar 1-6 en las teclas al iniciar")
+    p.add_argument("--self-test", metavar="ARCHIVO",
+                   help="comprobar que la instalación está completa y escribir el resultado")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=__version__)
     args = p.parse_args(argv)
+
+    if args.self_test:
+        from .selftest import run as self_test
+        return self_test(args.self_test)
 
     _setup_logging(args.verbose)
     log = logging.getLogger("akp03")
@@ -83,6 +112,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.debug_input:
         return _debug_input(cfg)
 
+    from .instance import SingleInstance
+
+    instance = SingleInstance()
+    if not instance.acquire():
+        log.info("%s ya está abierto: se muestra su ventana", APP_NAME)
+        return 0
+
     from .controller import Controller
     from .media import create_backend
 
@@ -94,16 +130,20 @@ def main(argv: list[str] | None = None) -> int:
 
     from .power import PowerEvents, PowerMonitor
 
+    stop = threading.Event()
+    # Se reemplaza al crear la ventana: Windows (o el instalador al actualizar)
+    # pide cerrar el programa con WM_ENDSESSION.
+    request_exit: list = [stop.set]
     power = PowerMonitor(PowerEvents(
         on_shutdown=ctrl.power_shutdown, on_suspend=ctrl.power_suspend,
         on_resume=ctrl.power_resume, on_display=ctrl.display_changed,
-        display_enabled=lambda: bool(ctrl.config["app"]["screen_off_with_monitor"])))
+        display_enabled=lambda: bool(ctrl.config["app"]["screen_off_with_monitor"]),
+        on_exit=lambda: request_exit[0]()))
     power.start()
     if args.identify:
         ctrl.identify()
 
     if args.headless:
-        stop = threading.Event()
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -118,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             stop.wait(1.0)
         power.stop()
         ctrl.stop()
+        instance.release()
         return 0
 
     try:
@@ -128,11 +169,14 @@ def main(argv: list[str] | None = None) -> int:
         ctrl.stop()
         return 1
     app = App(ctrl, start_minimized=args.minimized or cfg["app"]["start_minimized"])
+    instance.on_show = lambda: app.call_soon(app.show)
+    request_exit[0] = lambda: app.call_soon(app.quit)
     try:
         app.run()
     finally:
         power.stop()
         ctrl.stop()
+        instance.release()
     return 0
 
 
