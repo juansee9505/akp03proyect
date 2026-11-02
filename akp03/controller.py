@@ -13,6 +13,7 @@ import webbrowser
 from typing import Callable, Optional
 
 from .config import DEFAULT_KEY_ACTION, NUM_KEYS, save_config
+from .gamemode import fullscreen_app_active
 from .device import AKP03Device, DeviceError, InputEvent, build_input_map
 from .media.base import MediaBackend, MediaState
 from .obs import OBSActions, OBSClient, OBSConnectionLost, OBSError
@@ -27,6 +28,9 @@ TRACK_KNOB_DEBOUNCE = 0.35
 # cuadros (ahorra CPU). Cualquier entrada o cambio de estado lo despierta.
 IDLE_AFTER_SECONDS = 1.0
 IDLE_INTERVAL = 0.5
+# Modo juego (hay un juego a pantalla completa delante): menos trabajo.
+GAME_MODE_FRAME_INTERVAL = 0.25  # como mucho 4 cuadros/s; el texto no se desplaza
+GAME_MODE_POLL_INTERVAL = 2.0  # consultar la música cada 2 s
 
 
 def _parse_id(value) -> Optional[int]:
@@ -77,6 +81,8 @@ class Controller:
         self.last_frame: list = []
         self.frame_id = 0
         self.input_log: list[str] = []
+        self.game_mode = False  # True mientras hay un juego a pantalla completa delante
+        self._fullscreen_check: Callable[[], bool] = fullscreen_app_active
         self.obs_status = ""
         self.last_knob: tuple[int, float] = (-1, 0.0)  # (índice, momento) de la última perilla usada
         obs_cfg = config["obs"]
@@ -347,6 +353,8 @@ class Controller:
             # Espera hasta el siguiente cuadro, pero responde al instante a las entradas.
             # Si la pantalla está quieta, se dibuja con menos frecuencia.
             interval = 1.0 / self.config["display"]["fps"]
+            if self.game_mode:
+                interval = max(interval, GAME_MODE_FRAME_INTERVAL)
             if frame_start - self._last_change > IDLE_AFTER_SECONDS:
                 interval = max(interval, IDLE_INTERVAL)
             deadline = frame_start + interval
@@ -407,8 +415,21 @@ class Controller:
                 if (st.track_key, st.status, st.art_key, st.volume, st.muted, st.mic_muted) != (
                         prev.track_key, prev.status, prev.art_key, prev.volume, prev.muted, prev.mic_muted):
                     self.wake()
-            self._refresh.wait(float(self.config["media"]["poll_interval"]))
+            self._update_game_mode()
+            poll = float(self.config["media"]["poll_interval"])
+            if self.game_mode:
+                poll = max(poll, GAME_MODE_POLL_INTERVAL)
+            self._refresh.wait(poll)
             self._refresh.clear()
+
+    def _update_game_mode(self) -> None:
+        enabled = bool(self.config["app"].get("game_mode", True))
+        active = enabled and self._fullscreen_check()
+        if active != self.game_mode:
+            self.game_mode = active
+            self.renderer.scroll = not active
+            log.info("Modo juego %s", "activado: menos trabajo mientras juegas" if active
+                     else "desactivado")
 
     def _action_loop(self) -> None:
         while True:

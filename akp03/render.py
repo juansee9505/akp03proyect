@@ -328,6 +328,7 @@ class Renderer:
 
     def __init__(self, config: dict):
         self._auto_size = self.DEFAULT_KEY_SIZE
+        self.scroll = True  # False en modo juego: el texto no se desplaza
         self.update_config(config)
         self._art_key: Optional[str] = None
         self._art: Optional[Image.Image] = None
@@ -432,6 +433,8 @@ class Renderer:
         pause = 1.5
         cycle = pause + (tw + gap) / max(1.0, self.scroll_speed)
         phase = t % cycle
+        if not self.scroll:  # modo juego: texto quieto (se ve el principio)
+            phase = 0.0
         offset = 0 if phase < pause else int((phase - pause) * self.scroll_speed) % (tw + gap)
         strip = text_strip(text, fnt, tuple(fill), gap)
         window = strip.crop((offset, 0, offset + width, strip.height))

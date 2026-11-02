@@ -45,6 +45,20 @@ Notas:
 - «Silenciar micrófono» silencia el micrófono predeterminado de Windows, así que afecta a
   todas las apps (OBS, Discord, etc.).
 
+## Juegos (modo juego)
+
+El programa siempre corre con **prioridad baja** (y EcoQoS en Windows 11), así que los
+juegos tienen preferencia. Además, cuando hay un juego a pantalla completa delante
+(también en «ventana sin bordes»), entra en **modo juego**: el texto deja de desplazarse,
+dibuja como mucho 4 veces por segundo y consulta la música cada 2 s. Las teclas y ruedas
+siguen respondiendo al instante. Se puede desactivar en *General*.
+
+> World of Warcraft: si los consumibles o «buffs» muestran duraciones de días, no lo causa
+> este programa (no toca la hora ni los temporizadores del sistema). WoW mide esos tiempos
+> con el tiempo que lleva encendido el PC; prueba a **reiniciar** (no apagar: con el
+> «inicio rápido» de Windows, apagar no reinicia ese contador) y a desactivar addons de
+> temporizadores.
+
 ## Apagar el PC
 
 Al **apagar, reiniciar, cerrar sesión, suspender o hibernar** Windows, el programa apaga la
@@ -184,6 +198,7 @@ sudo udevadm control --reload && sudo udevadm trigger
 | `akp03/media/linux.py` | Lo mismo en Linux (playerctl / wpctl) |
 | `akp03/render.py`, `akp03/icons.py` | Dibujo de cada tecla, texto desplazable, GIF animados |
 | `akp03/obs.py` | Cliente de obs-websocket v5 y acciones de OBS |
+| `akp03/gamemode.py` | Prioridad baja y detección de juegos a pantalla completa |
 | `akp03/power.py` | Avisos de Windows: apagar, suspender, monitor apagado |
 | `akp03/instance.py` | Una sola copia abierta a la vez |
 | `akp03/selftest.py` | Autoprueba del ejecutable (`--self-test`) |

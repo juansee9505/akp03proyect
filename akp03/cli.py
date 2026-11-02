@@ -96,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(args.verbose)
     log = logging.getLogger("akp03")
 
+    from .gamemode import lower_process_priority
+
+    lower_process_priority()  # que los juegos siempre tengan preferencia
+
     if args.list_devices:
         from .device import DeviceError, describe_hid_devices
 

@@ -163,6 +163,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "screen_off_with_monitor": True,
         # Tema de la ventana: "system" (como Windows), "dark" o "light".
         "theme": "system",
+        # Con un juego a pantalla completa delante, trabajar menos (texto quieto,
+        # menos cuadros por segundo) para no causar tirones.
+        "game_mode": True,
     },
 }
 

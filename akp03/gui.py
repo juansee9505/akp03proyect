@@ -760,6 +760,13 @@ class App:
         self.tray_var = tk.BooleanVar(value=app["minimize_to_tray"])
         ttk.Checkbutton(f, text="Al cerrar la ventana, seguir en la bandeja",
                         variable=self.tray_var, command=self._general_changed).pack(anchor="w", pady=3)
+        self.game_var = tk.BooleanVar(value=app["game_mode"])
+        ttk.Checkbutton(f, text="Modo juego automático",
+                        variable=self.game_var, command=self._general_changed).pack(anchor="w", pady=3)
+        ttk.Label(f, text=("Con un juego a pantalla completa delante, el programa trabaja menos "
+                           "(el texto no se desplaza) para no causar tirones. Las teclas y ruedas "
+                           "siguen respondiendo igual."),
+                  style="Hint.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(0, 3))
         self.monitor_var = tk.BooleanVar(value=app["screen_off_with_monitor"])
         ttk.Checkbutton(f, text="Apagar las teclas cuando se apaga el monitor",
                         variable=self.monitor_var, command=self._general_changed).pack(anchor="w", pady=3)
@@ -883,6 +890,7 @@ class App:
             cfg["app"]["start_minimized"] = bool(self.min_var.get())
             cfg["app"]["minimize_to_tray"] = bool(self.tray_var.get())
             cfg["app"]["screen_off_with_monitor"] = bool(self.monitor_var.get())
+            cfg["app"]["game_mode"] = bool(self.game_var.get())
 
         self._update(fn)
 
@@ -912,7 +920,8 @@ class App:
         self._update_tray_title()
         # Oculta en la bandeja o minimizada: no hay nada que dibujar, se revisa
         # con poca frecuencia sólo para notar cuándo vuelve a mostrarse.
-        visible = self.root.state() not in ("withdrawn", "iconic")
+        # En modo juego (WoW u otro juego delante) tampoco: la vista previa no se ve.
+        visible = self.root.state() not in ("withdrawn", "iconic") and not self.ctrl.game_mode
         if visible:
             try:
                 self._refresh()

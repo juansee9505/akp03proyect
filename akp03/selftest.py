@@ -13,7 +13,7 @@ import traceback
 from typing import Callable
 
 REQUIRED_MODULES = ["PIL.Image", "PIL.ImageTk", "tkinter", "sv_ttk", "websocket", "hid",
-                    "akp03.gui", "akp03.power", "akp03.instance"]
+                    "akp03.gui", "akp03.power", "akp03.instance", "akp03.gamemode"]
 WINDOWS_MODULES = ["pystray", "pystray._win32", "pycaw.pycaw", "comtypes", "psutil",
                    "winrt.windows.media.control", "winrt.windows.storage.streams"]
 
@@ -82,6 +82,13 @@ def run(out_path: str) -> int:
 
         # En un servidor sin audio/sesión multimedia esto puede fallar: aviso, no error.
         check("API multimedia y volumen de Windows", media, required=False)
+
+        def game():
+            from .gamemode import _fullscreen_windows, lower_process_priority
+            lower_process_priority()
+            return f"pantalla completa delante: {_fullscreen_windows()}"
+
+        check("modo juego (prioridad baja y detección)", game)
 
     lines.append("RESULTADO: " + ("FALLÓ" if failed else "OK"))
     with open(out_path, "w", encoding="utf-8") as fh:
